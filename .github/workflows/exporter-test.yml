@@ -1,0 +1,89 @@
+name: Exporter tests
+
+on:
+  push:
+    paths:
+      - 'exporter/**'
+      - '.github/workflows/exporter-test.yml'
+  pull_request:
+    paths:
+      - 'exporter/**'
+      - '.github/workflows/exporter-test.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.21', '1.22']
+        postgres-version: ['13', '14', '15', '16']
+    
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres-version }}
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: true
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ matrix.go-version }}
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y postgresql-client
+    
+    - name: Build WAL-G
+      run: |
+        make deps
+        make pg_build
+    
+    - name: Test exporter
+      run: |
+        cd exporter
+        go test -v ./...
+        go test -bench=. -benchmem ./...
+    
+    - name: Build exporter
+      run: |
+        cd exporter
+        go build -o walg-exporter
+    
+    - name: Integration test with real WAL-G
+      run: |
+        cd exporter
+        export WALG_BINARY="../main/pg/wal-g"
+        timeout 30s ./walg-exporter --walg.path="$WALG_BINARY" --scrape.interval=5s &
+        sleep 10
+        curl -f http://localhost:9351/metrics | grep -E "walg_backup_|walg_wal_|walg_lsn_|walg_pitr_"
+        kill %1
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.22'
+    
+    - name: golangci-lint
+      uses: golangci/golangci-lint-action@v3
+      with:
+        version: latest
+        working-directory: exporter 
