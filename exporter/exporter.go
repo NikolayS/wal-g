@@ -273,7 +273,7 @@ func (e *WalgExporter) getWalInfo() (*WalInfo, error) {
 // updateBackupMetrics updates backup-related metrics
 func (e *WalgExporter) updateBackupMetrics(backups []BackupInfo) {
 	now := time.Now()
-	
+
 	// Reset counters
 	e.backupCount.Reset()
 	e.backupTimestamp.Reset()
@@ -353,4 +353,4 @@ func (e *WalgExporter) updatePitrWindow(backups []BackupInfo, walInfo *WalInfo) 
 	// In a real implementation, this should be to the latest WAL segment
 	pitrWindow := time.Since(oldestBackup).Seconds()
 	e.pitrWindow.Set(pitrWindow)
-} 
+}

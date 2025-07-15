@@ -16,11 +16,10 @@ import (
 )
 
 var (
-	listenAddr = flag.String("web.listen-address", ":9351", "Address to listen on for web interface and telemetry.")
-	metricsPath = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
-	walgPath = flag.String("walg.path", "wal-g", "Path to the wal-g binary.")
+	listenAddr     = flag.String("web.listen-address", ":9351", "Address to listen on for web interface and telemetry.")
+	metricsPath    = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
+	walgPath       = flag.String("walg.path", "wal-g", "Path to the wal-g binary.")
 	scrapeInterval = flag.Duration("scrape.interval", 60*time.Second, "Interval between scrapes.")
-	logLevel = flag.String("log.level", "info", "Log level (debug, info, warn, error).")
 )
 
 func main() {
@@ -93,4 +92,4 @@ func main() {
 	}
 
 	log.Println("Exporter shutdown complete")
-} 
+}
