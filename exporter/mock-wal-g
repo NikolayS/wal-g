@@ -1,0 +1,13 @@
+#!/bin/bash
+case "$1" in
+  "backup-list")
+    if [[ "$2" == "--detail" && "$3" == "--json" ]]; then
+      echo '[{"backup_name":"base_000000010000000000000001","time":"2024-01-01T12:00:00Z","wal_file_name":"000000010000000000000001","start_lsn":"0/1000000","finish_lsn":"0/2000000","permanent":false,"user_data":"","is_full":true},{"backup_name":"base_000000010000000000000002","time":"2024-01-01T13:00:00Z","wal_file_name":"000000010000000000000002","start_lsn":"0/2000000","finish_lsn":"0/3000000","permanent":false,"user_data":"","is_full":false}]'
+    fi
+    ;;
+  "wal-show")
+    if [[ "$2" == "--detailed-json" ]]; then
+      echo '{"integrity":{"status":"OK","details":[{"timeline_id":1,"start_segment":"000000010000000000000001","end_segment":"000000010000000000000005","segments_count":5,"status":"FOUND"},{"timeline_id":2,"start_segment":"000000020000000000000001","end_segment":"000000020000000000000003","segments_count":3,"status":"FOUND"}]},"timeline":{"status":"OK","details":{"current_timeline_id":2,"highest_storage_timeline_id":2}}}'
+    fi
+    ;;
+esac
