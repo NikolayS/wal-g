@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,30 +16,55 @@ import (
 )
 
 var (
-	listenAddr     = flag.String("web.listen-address", ":9351", "Address to listen on for web interface and telemetry.")
-	metricsPath    = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
-	walgPath       = flag.String("walg.path", "wal-g", "Path to the wal-g binary.")
-	scrapeInterval = flag.Duration("scrape.interval", 60*time.Second, "Interval between scrapes.")
-	walgConfigPath = flag.String("walg.config-path", "", "Path to the wal-g config file.")
+	listenAddr            = flag.String("web.listen-address", ":9351", "Address to listen on for web interface and telemetry.")
+	metricsPath           = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
+	walgPath              = flag.String("walg.path", "wal-g", "Path to the wal-g binary.")
+	backupScrapeInterval  = flag.Duration("backup-list.scrape-interval", 60*time.Second, "Interval between backup-list scrapes.")
+	verifyScrapeInterval  = flag.Duration("wal-verify.scrape-interval", 5*time.Minute, "Interval between wal-verify scrapes.")
+	storageScrapeInterval = flag.Duration("storage-check.scrape-interval", 30*time.Second, "Interval between storage scrapes.")
+	walgConfigPath        = flag.String("walg.config-path", "", "Path to the wal-g config file.")
 )
 
 func main() {
 	flag.Parse()
 
-	log.Printf("Starting WAL-G Prometheus exporter")
-	log.Printf("Listen address: %s", *listenAddr)
-	log.Printf("Metrics path: %s", *metricsPath)
-	log.Printf("WAL-G path: %s", *walgPath)
-	log.Printf("Scrape interval: %v", *scrapeInterval)
-	log.Printf("WAL-G config path: %s", *walgConfigPath)
+	// Initialize structured logger
+	// Using TextHandler for production-ready structured logs
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	logger.Info("Starting WAL-G Prometheus exporter",
+		"listen_address", *listenAddr,
+		"metrics_path", *metricsPath,
+		"walg_path", *walgPath,
+		"walg_config", *walgConfigPath,
+		slog.Group("intervals",
+			slog.Duration("backup", *backupScrapeInterval),
+			slog.Duration("verify", *verifyScrapeInterval),
+			slog.Duration("storage", *storageScrapeInterval),
+		),
+	)
+
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	unsupportedEnvs := []string{
+		"WALG_LOG_LEVEL",
+		"S3_LOG_LEVEL",
+	}
+
+	for _, env := range unsupportedEnvs {
+		if val := os.Getenv(env); val != "" {
+			logger.Warn("Clearing unsupported environment variable", "key", env, "value", val)
+			os.Unsetenv(env)
+		}
+	}
+
 	// Create and register the exporter
-	exporter, err := NewWalgExporter(*walgPath, *scrapeInterval, *walgConfigPath)
+	exporter, err := NewWalgExporter(logger, *walgPath, *backupScrapeInterval, *verifyScrapeInterval, *storageScrapeInterval, *walgConfigPath)
 	if err != nil {
-		log.Fatalf("Failed to create exporter: %v", err)
+		logger.Error("Failed to create exporter", "error", err)
+		os.Exit(1)
 	}
 
 	prometheus.MustRegister(exporter)
@@ -68,18 +93,19 @@ func main() {
 
 	// Start HTTP server in a goroutine
 	go func() {
-		log.Printf("Starting HTTP server on %s", *listenAddr)
+		logger.Info("Starting HTTP server", "addr", *listenAddr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP server failed: %v", err)
+			logger.Error("HTTP server failed", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	// Wait for interrupt signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
+	sig := <-sigChan
 
-	log.Println("Received shutdown signal, shutting down gracefully...")
+	logger.Info("Received shutdown signal", "signal", sig.String())
 
 	// Cancel context to stop exporter
 	cancel()
@@ -89,8 +115,8 @@ func main() {
 	defer shutdownCancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("HTTP server shutdown error: %v", err)
+		logger.Error("HTTP server shutdown error", "error", err)
 	}
 
-	log.Println("Exporter shutdown complete")
+	logger.Info("Exporter shutdown complete")
 }

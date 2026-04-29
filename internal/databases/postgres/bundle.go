@@ -72,7 +72,7 @@ type Bundle struct {
 	IncrementFromName  string
 	DeltaMap           PagedFileDeltaMap
 	TablespaceSpec     TablespaceSpec
-	DataCatalogSize    *int64
+	DataCatalogSize    atomic.Int64
 
 	forceIncremental bool
 
@@ -97,7 +97,6 @@ func NewBundle(
 		IncrementFromName:  incrementFromName,
 		TablespaceSpec:     NewTablespaceSpec(directory),
 		forceIncremental:   forceIncremental,
-		DataCatalogSize:    new(int64),
 	}
 }
 
@@ -184,6 +183,7 @@ func (bundle *Bundle) StartBackup(queryRunner *PgQueryRunner,
 // ExcludedFilenames. Excluded directories will be created but their
 // contents will not be included in the tar bundle.
 func (bundle *Bundle) HandleWalkedFSObject(path string, info os.FileInfo, err error) error {
+	path = filepath.ToSlash(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			tracelog.WarningLogger.Println(path, " deleted during filepath walk")
@@ -192,7 +192,7 @@ func (bundle *Bundle) HandleWalkedFSObject(path string, info os.FileInfo, err er
 		return errors.Wrap(err, "HandleWalkedFSObject: walk failed")
 	}
 
-	atomic.AddInt64(bundle.DataCatalogSize, info.Size())
+	bundle.DataCatalogSize.Add(info.Size())
 
 	path, err = bundle.TablespaceSpec.makeTablespaceSymlinkPath(path)
 	if err != nil {

@@ -208,7 +208,16 @@ func (queryRunner *PgQueryRunner) getSystemIdentifier() (err error) {
 		return nil
 	}
 	conn := queryRunner.Connection
-	err = conn.QueryRow(context.TODO(), queryRunner.buildGetSystemIdentifier()).Scan(&queryRunner.SystemIdentifier)
+	var systemIdentifier int64
+	err = conn.QueryRow(context.TODO(), queryRunner.buildGetSystemIdentifier()).Scan(&systemIdentifier)
+	if err == nil {
+		// Intentionally scan into int64 and then convert to uint64 so negative
+		// int64 values are reinterpreted via two's-complement wraparound. This
+		// preserves the system identifier representation expected by PostgreSQL
+		// tooling; do not replace this with a direct uint64 scan.
+		converted := uint64(systemIdentifier)
+		queryRunner.SystemIdentifier = &converted
+	}
 	return errors.Wrap(err, "System Identifier: getting identifier of DB failed")
 }
 
