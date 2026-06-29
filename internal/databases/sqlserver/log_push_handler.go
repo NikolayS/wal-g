@@ -4,22 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-	"syscall"
-
-	"github.com/wal-g/wal-g/internal/databases/sqlserver/blob"
 
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal"
-	"github.com/wal-g/wal-g/utility"
+	"github.com/wal-g/wal-g/internal/databases/sqlserver/blob"
 )
 
-func HandleLogPush(dbnames []string, norecovery bool) {
-	ctx, cancel := context.WithCancel(context.Background())
-	signalHandler := utility.NewSignalHandler(ctx, cancel, []os.Signal{syscall.SIGINT, syscall.SIGTERM})
-	defer func() { _ = signalHandler.Close() }()
+func HandleLogPush(ctx context.Context, dbnames []string, norecovery bool) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	folder, err := internal.ConfigureStorage()
+	folder, err := internal.ConfigureStorage(ctx)
 	tracelog.ErrorLogger.FatalOnError(err)
 
 	db, err := getSQLServerConnection()

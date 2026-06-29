@@ -1,15 +1,15 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"path"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/pkg/errors"
 	"github.com/wal-g/tracelog"
-
 	"github.com/wal-g/wal-g/internal/multistorage"
 	"github.com/wal-g/wal-g/pkg/storages/storage"
 	"github.com/wal-g/wal-g/utility"
@@ -26,10 +26,8 @@ type TimedBackup interface {
 }
 
 func SortTimedBackup(backups []TimedBackup) {
-	sort.Slice(backups, func(i, j int) bool {
-		b1 := backups[i]
-		b2 := backups[j]
-		return b1.StartTime().After(b2.StartTime())
+	slices.SortFunc(backups, func(a, b TimedBackup) int {
+		return b.StartTime().Compare(a.StartTime())
 	})
 }
 
@@ -52,18 +50,18 @@ func (err NoBackupsFoundError) Error() string {
 	return fmt.Sprintf(tracelog.GetErrorFormatter(), err.error)
 }
 
-func GetBackupByName(backupName, subfolder string, folder storage.Folder) (backup Backup, err error) {
+func GetBackupByName(ctx context.Context, backupName, subfolder string, folder storage.Folder) (backup Backup, err error) {
 	baseBackupFolder := folder.GetSubFolder(subfolder)
 
 	if backupName == LatestString {
-		return GetLatestBackup(baseBackupFolder)
+		return GetLatestBackup(ctx, baseBackupFolder)
 	}
 
-	return GetSpecificBackup(baseBackupFolder, backupName)
+	return GetSpecificBackup(ctx, baseBackupFolder, backupName)
 }
 
-func GetLatestBackup(folder storage.Folder) (backup Backup, err error) {
-	backupTimes, err := GetBackups(folder)
+func GetLatestBackup(ctx context.Context, folder storage.Folder) (backup Backup, err error) {
+	backupTimes, err := GetBackups(ctx, folder)
 	if err != nil {
 		return Backup{}, err
 	}
@@ -72,23 +70,23 @@ func GetLatestBackup(folder storage.Folder) (backup Backup, err error) {
 	latest := backupTimes[len(backupTimes)-1]
 	tracelog.InfoLogger.Printf("LATEST backup is: '%s'\n", latest.BackupName)
 
-	return NewBackupInStorage(folder, latest.BackupName, latest.StorageName)
+	return NewBackupInStorage(ctx, folder, latest.BackupName, latest.StorageName)
 }
 
-func GetSpecificBackup(folder storage.Folder, name string) (Backup, error) {
+func GetSpecificBackup(ctx context.Context, folder storage.Folder, name string) (Backup, error) {
 	sentinelName := SentinelNameFromBackup(name)
-	exists, storageName, err := multistorage.Exists(folder, sentinelName)
+	exists, storageName, err := multistorage.Exists(ctx, folder, sentinelName)
 	if err != nil {
 		return Backup{}, fmt.Errorf("checking sentinel file %q for existence: %w", sentinelName, err)
 	}
 	if !exists {
 		return Backup{}, NewBackupNonExistenceError(name)
 	}
-	return NewBackupInStorage(folder, name, storageName)
+	return NewBackupInStorage(ctx, folder, name, storageName)
 }
 
-func GetBackupSentinelObjects(folder storage.Folder) ([]storage.Object, error) {
-	objects, _, err := folder.GetSubFolder(utility.BaseBackupPath).ListFolder()
+func GetBackupSentinelObjects(ctx context.Context, folder storage.Folder) ([]storage.Object, error) {
+	objects, _, err := folder.GetSubFolder(utility.BaseBackupPath).ListFolder(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -104,8 +102,8 @@ func GetBackupSentinelObjects(folder storage.Folder) ([]storage.Object, error) {
 }
 
 // GetBackups receives all backup descriptions from the folder.
-func GetBackups(folder storage.Folder) (backups []BackupTime, err error) {
-	backupObjects, _, err := folder.ListFolder()
+func GetBackups(ctx context.Context, folder storage.Folder) (backups []BackupTime, err error) {
+	backupObjects, _, err := folder.ListFolder(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -119,8 +117,8 @@ func GetBackups(folder storage.Folder) (backups []BackupTime, err error) {
 	return
 }
 
-func GetBackupsAndGarbage(folder storage.Folder) (backups []BackupTime, garbage []string, err error) {
-	backupObjects, subFolders, err := folder.ListFolder()
+func GetBackupsAndGarbage(ctx context.Context, folder storage.Folder) (backups []BackupTime, garbage []string, err error) {
+	backupObjects, subFolders, err := folder.ListFolder(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -147,8 +145,8 @@ func GetBackupTimeSlices(backupObjects []storage.Object) []BackupTime {
 }
 
 func SortBackupTimeSlices(backupTimes []BackupTime) {
-	sort.Slice(backupTimes, func(i, j int) bool {
-		return backupTimes[i].Time.Before(backupTimes[j].Time)
+	slices.SortStableFunc(backupTimes, func(a, b BackupTime) int {
+		return a.Time.Compare(b.Time)
 	})
 }
 
@@ -182,12 +180,12 @@ func StreamMetadataNameFromBackup(backupName string) string {
 
 // UnwrapLatestModifier checks if LATEST is provided instead of BackupName
 // if so, replaces it with the name of the latest backup
-func UnwrapLatestModifier(backupName string, folder storage.Folder) (string, error) {
+func UnwrapLatestModifier(ctx context.Context, backupName string, folder storage.Folder) (string, error) {
 	if backupName != LatestString {
 		return backupName, nil
 	}
 
-	latest, err := GetLatestBackup(folder)
+	latest, err := GetLatestBackup(ctx, folder)
 	if err != nil {
 		return "", err
 	}
@@ -195,8 +193,8 @@ func UnwrapLatestModifier(backupName string, folder storage.Folder) (string, err
 	return latest.Name, nil
 }
 
-func FolderSize(folder storage.Folder, path string) (int64, error) {
-	dataObjects, _, err := folder.GetSubFolder(path).ListFolder()
+func FolderSize(ctx context.Context, folder storage.Folder, path string) (int64, error) {
+	dataObjects, _, err := folder.GetSubFolder(path).ListFolder(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -248,10 +246,10 @@ func SplitPurgingBackups(backups []TimedBackup,
 }
 
 // DeleteGarbage purges given garbage keys
-func DeleteGarbage(folder storage.Folder, garbage []string) error {
+func DeleteGarbage(ctx context.Context, folder storage.Folder, garbage []string) error {
 	var objects []storage.Object
 	for _, prefix := range garbage {
-		garbageObjects, err := storage.ListFolderRecursively(folder.GetSubFolder(prefix))
+		garbageObjects, err := storage.ListFolderRecursively(ctx, folder.GetSubFolder(prefix))
 		if err != nil {
 			return err
 		}
@@ -266,18 +264,18 @@ func DeleteGarbage(folder storage.Folder, garbage []string) error {
 		}
 	}
 	tracelog.DebugLogger.Printf("Garbage keys will be deleted: %+v\n", objects)
-	return folder.DeleteObjects(objects)
+	return folder.DeleteObjects(ctx, objects)
 }
 
 // DeleteBackups purges given backups files
 // TODO: extract BackupLayout abstraction and provide DataPath(), SentinelPath(), Exists() methods
-func DeleteBackups(folder storage.Folder, backups []string) error {
+func DeleteBackups(ctx context.Context, folder storage.Folder, backups []string) error {
 	keys := make([]storage.Object, 0, len(backups)*2)
 	for i := range backups {
 		backupName := backups[i]
 		keys = append(keys, storage.NewLocalObject(SentinelNameFromBackup(backupName), time.Time{}, 0))
 
-		dataObjects, err := storage.ListFolderRecursively(folder.GetSubFolder(backupName))
+		dataObjects, err := storage.ListFolderRecursively(ctx, folder.GetSubFolder(backupName))
 		if err != nil {
 			return err
 		}
@@ -287,7 +285,7 @@ func DeleteBackups(folder storage.Folder, backups []string) error {
 	}
 
 	tracelog.DebugLogger.Printf("Backup keys will be deleted: %+v\n", keys)
-	if err := folder.DeleteObjects(keys); err != nil {
+	if err := folder.DeleteObjects(ctx, keys); err != nil {
 		return err
 	}
 	return nil

@@ -2,16 +2,15 @@ package postgres
 
 import (
 	"archive/tar"
+	"cmp"
 	"context"
 	"os"
-	"sort"
+	"slices"
 	"sync"
 
-	"github.com/wal-g/tracelog"
-
-	"github.com/wal-g/wal-g/internal"
-
 	"github.com/pkg/errors"
+	"github.com/wal-g/tracelog"
+	"github.com/wal-g/wal-g/internal"
 	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/internal/crypto"
 	"golang.org/x/sync/errgroup"
@@ -33,10 +32,10 @@ func NewRatingTarBallComposerMaker(relFileStats RelFileStatistics,
 	}, nil
 }
 
-func (maker *RatingTarBallComposerMaker) Make(bundle *Bundle) (internal.TarBallComposer, error) {
+func (maker *RatingTarBallComposerMaker) Make(ctx context.Context, bundle *Bundle) (internal.TarBallComposer, error) {
 	composeRatingEvaluator := internal.NewDefaultComposeRatingEvaluator(bundle.IncrementFromFiles)
 	filePacker := NewTarBallFilePacker(bundle.DeltaMap, bundle.IncrementFromLsn, maker.bundleFiles, maker.filePackerOptions)
-	return NewRatingTarBallComposer(uint64(bundle.TarSizeThreshold),
+	return NewRatingTarBallComposer(ctx, uint64(bundle.TarSizeThreshold),
 		composeRatingEvaluator,
 		bundle.IncrementFromLsn,
 		bundle.DeltaMap,
@@ -88,7 +87,8 @@ type RatingTarBallComposer struct {
 
 	addFileQueue chan *internal.ComposeFileInfo
 	errorGroup   *errgroup.Group
-	ctx          context.Context
+	ctx          context.Context //nolint:containedctx // errgroup root feeds async addFile workers during filepath.Walk
+	reqCtx       context.Context //nolint:containedctx // request ctx; outlives errorGroup ctx for post-Wait deques
 
 	fileStats   RelFileStatistics
 	bundleFiles internal.BundleFiles
@@ -102,11 +102,12 @@ type RatingTarBallComposer struct {
 }
 
 func NewRatingTarBallComposer(
+	ctx context.Context,
 	tarSizeThreshold uint64, updateRatingEvaluator internal.ComposeRatingEvaluator,
 	incrementBaseLsn *LSN, deltaMap PagedFileDeltaMap, tarBallQueue *internal.TarBallQueue,
 	crypter crypto.Crypter, fileStats RelFileStatistics, bundleFiles internal.BundleFiles, packer *TarBallFilePackerImpl,
 ) (*RatingTarBallComposer, error) {
-	errorGroup, ctx := errgroup.WithContext(context.Background())
+	errorGroup, egCtx := errgroup.WithContext(ctx)
 	deltaMapComplete := true
 	if deltaMap == nil {
 		deltaMapComplete = false
@@ -127,7 +128,8 @@ func NewRatingTarBallComposer(
 		bundleFiles:            bundleFiles,
 		tarFilePacker:          packer,
 		errorGroup:             errorGroup,
-		ctx:                    ctx,
+		ctx:                    egCtx,
+		reqCtx:                 ctx,
 	}
 
 	maxUploadDiskConcurrency, err := conf.GetMaxUploadDiskConcurrency()
@@ -181,8 +183,11 @@ func (c *RatingTarBallComposer) FinishComposing() (internal.TarFileSets, error) 
 	tarFileSets.AddFiles(headersTarName, headersNames)
 
 	for _, tarFilesCollection := range tarFilesCollections {
-		tarBall := c.tarBallQueue.Deque()
-		tarBall.SetUp(c.crypter)
+		tarBall, err := c.tarBallQueue.Deque(c.reqCtx)
+		if err != nil {
+			return nil, err
+		}
+		tarBall.SetUp(c.reqCtx, c.crypter)
 		for _, composeFileInfo := range tarFilesCollection.files {
 			tarFileSets.AddFile(tarBall.Name(), composeFileInfo.Header.Name)
 		}
@@ -190,7 +195,7 @@ func (c *RatingTarBallComposer) FinishComposing() (internal.TarFileSets, error) 
 		tarFilesCollectionLocal := tarFilesCollection
 		go func() {
 			for _, fileInfo := range tarFilesCollectionLocal.files {
-				err := c.tarFilePacker.PackFileIntoTar(&fileInfo.ComposeFileInfo, tarBall)
+				err := c.tarFilePacker.PackFileIntoTar(c.reqCtx, &fileInfo.ComposeFileInfo, tarBall)
 				if err != nil {
 					panic(err)
 				}
@@ -243,8 +248,8 @@ func (c *RatingTarBallComposer) addFile(cfi *internal.ComposeFileInfo) error {
 }
 
 func (c *RatingTarBallComposer) sortFiles() {
-	sort.Slice(c.filesToCompose, func(i, j int) bool {
-		return c.filesToCompose[i].updateRating < c.filesToCompose[j].updateRating
+	slices.SortFunc(c.filesToCompose, func(a, b *RatedComposeFileInfo) int {
+		return cmp.Compare(a.updateRating, b.updateRating)
 	})
 }
 
@@ -303,7 +308,7 @@ func (c *RatingTarBallComposer) getExpectedFileSize(cfi *internal.ComposeFileInf
 }
 
 func (c *RatingTarBallComposer) scanDeltaMapFor(filePath string, fileSize int64) error {
-	locations, err := ReadIncrementLocations(filePath, fileSize, *c.incrementBaseLsn)
+	locations, err := ReadIncrementLocations(c.reqCtx, filePath, fileSize, *c.incrementBaseLsn)
 	if err != nil {
 		return err
 	}
@@ -317,8 +322,11 @@ func (c *RatingTarBallComposer) scanDeltaMapFor(filePath string, fileSize int64)
 }
 
 func (c *RatingTarBallComposer) writeHeaders(headers []*tar.Header) (string, []string, error) {
-	headersTarBall := c.tarBallQueue.Deque()
-	headersTarBall.SetUp(c.crypter)
+	headersTarBall, err := c.tarBallQueue.Deque(c.reqCtx)
+	if err != nil {
+		return "", nil, err
+	}
+	headersTarBall.SetUp(c.reqCtx, c.crypter)
 	headersNames := make([]string, 0, len(headers))
 	for _, header := range headers {
 		err := headersTarBall.TarWriter().WriteHeader(header)

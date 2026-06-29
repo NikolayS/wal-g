@@ -1,9 +1,10 @@
 package mongo
 
 import (
+	"context"
 	"fmt"
 	"io"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/pkg/errors"
@@ -42,8 +43,8 @@ func NewBackupDetail(backupTime internal.BackupTime, sentinel *models.Backup) *B
 }
 
 // TODO: unit tests
-func HandleDetailedBackupList(folder storage.Folder, output io.Writer, pretty, json bool) error {
-	backupTimes, err := internal.GetBackups(folder)
+func HandleDetailedBackupList(ctx context.Context, folder storage.Folder, output io.Writer, pretty, json bool) error {
+	backupTimes, err := internal.GetBackups(ctx, folder)
 	err = internal.FilterOutNoBackupFoundError(err, json)
 	if err != nil {
 		return err
@@ -51,7 +52,7 @@ func HandleDetailedBackupList(folder storage.Folder, output io.Writer, pretty, j
 
 	backupDetails := make([]*BackupDetail, 0, len(backupTimes))
 	for _, backupTime := range backupTimes {
-		sentinel, err := common.DownloadSentinel(folder, backupTime.BackupName)
+		sentinel, err := common.DownloadSentinel(ctx, folder, backupTime.BackupName)
 		if err != nil {
 			return errors.Wrapf(err, "Unable to load sentinel of backup %v", backupTime.BackupName)
 		}
@@ -59,8 +60,8 @@ func HandleDetailedBackupList(folder storage.Folder, output io.Writer, pretty, j
 		backupDetails = append(backupDetails, backupDetail)
 	}
 
-	sort.Slice(backupDetails, func(i, j int) bool {
-		return backupDetails[i].FinishLocalTime.Before(backupDetails[j].FinishLocalTime)
+	slices.SortFunc(backupDetails, func(a, b *BackupDetail) int {
+		return a.FinishLocalTime.Compare(b.FinishLocalTime)
 	})
 
 	printableEntities := make([]printlist.Entity, len(backupDetails))

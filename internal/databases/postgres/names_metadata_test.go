@@ -3,11 +3,10 @@ package postgres_test
 import (
 	"bytes"
 	"encoding/json"
-	"sort"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-
 	"github.com/wal-g/wal-g/internal"
 	"github.com/wal-g/wal-g/internal/databases/postgres"
 	"github.com/wal-g/wal-g/pkg/storages/memory"
@@ -109,7 +108,7 @@ func TestResolveRegexp_RestoreAllForDatabase(t *testing.T) {
 	assert.False(t, ok3)
 
 	assert.Equal(t, 3, len(db1))
-	sort.Slice(db1, func(i, j int) bool { return db1[i] < db1[j] })
+	slices.Sort(db1)
 	assert.Equal(t, uint32(40000), db1[0])
 	assert.Equal(t, uint32(40001), db1[1])
 	assert.Equal(t, uint32(40002), db1[2])
@@ -128,12 +127,12 @@ func TestResolveRegexp_RestoreSomeDatabase(t *testing.T) {
 	assert.False(t, ok3)
 
 	assert.Equal(t, 3, len(db1))
-	sort.Slice(db1, func(i, j int) bool { return db1[i] < db1[j] })
+	slices.Sort(db1)
 	assert.Equal(t, uint32(40000), db1[0])
 	assert.Equal(t, uint32(40001), db1[1])
 	assert.Equal(t, uint32(40002), db1[2])
 	assert.Equal(t, 4, len(db2))
-	sort.Slice(db2, func(i, j int) bool { return db2[i] < db2[j] })
+	slices.Sort(db2)
 	assert.Equal(t, uint32(40100), db2[0])
 	assert.Equal(t, uint32(40101), db2[1])
 	assert.Equal(t, uint32(40102), db2[2])
@@ -152,7 +151,7 @@ func TestResolveRegexp_RestoreAllForDatabaseRegexp(t *testing.T) {
 	assert.False(t, ok2)
 	assert.False(t, ok3)
 
-	sort.Slice(db1, func(i, j int) bool { return db1[i] < db1[j] })
+	slices.Sort(db1)
 	assert.Equal(t, 3, len(db1))
 	assert.Equal(t, uint32(40000), db1[0])
 	assert.Equal(t, uint32(40001), db1[1])
@@ -171,7 +170,7 @@ func TestResolveRegexp_RestoreSomeTablesInDatabase(t *testing.T) {
 	assert.False(t, ok2)
 	assert.False(t, ok3)
 
-	sort.Slice(db1, func(i, j int) bool { return db1[i] < db1[j] })
+	slices.Sort(db1)
 	assert.Equal(t, 2, len(db1))
 	assert.Equal(t, uint32(40000), db1[0])
 	assert.Equal(t, uint32(40001), db1[1])
@@ -205,7 +204,7 @@ func TestResolveRegexp_RestoreSomeNamespaces(t *testing.T) {
 	assert.True(t, ok2)
 	assert.False(t, ok3)
 
-	sort.Slice(db2, func(i, j int) bool { return db2[i] < db2[j] })
+	slices.Sort(db2)
 	assert.Equal(t, 2, len(db2))
 	assert.Equal(t, uint32(40100), db2[0])
 	assert.Equal(t, uint32(40101), db2[1])
@@ -223,7 +222,7 @@ func TestResolveRegexp_RestoreAllInNamespace(t *testing.T) {
 	assert.True(t, ok2)
 	assert.False(t, ok3)
 
-	sort.Slice(db2, func(i, j int) bool { return db2[i] < db2[j] })
+	slices.Sort(db2)
 	assert.Equal(t, 2, len(db2))
 	assert.Equal(t, uint32(40102), db2[0])
 	assert.Equal(t, uint32(40103), db2[1])
@@ -261,10 +260,10 @@ func TestFetchDtoWithFilesMetadata(t *testing.T) {
 	bytesOld, _ := json.Marshal(oldObjects)
 	bytesNew, _ := json.Marshal(newObjects)
 
-	folder.PutObject("files_metadata_old.json", bytes.NewReader(bytesOld))
-	folder.PutObject("files_metadata_new.json", bytes.NewReader(bytesNew))
+	folder.PutObject(t.Context(), "files_metadata_old.json", bytes.NewReader(bytesOld))
+	folder.PutObject(t.Context(), "files_metadata_new.json", bytes.NewReader(bytesNew))
 	ansV1 := postgres.DatabaseObjectsInfo{}
-	err := internal.FetchDto(folder, &ansV1, "files_metadata_old.json")
+	err := internal.FetchDto(t.Context(), folder, &ansV1, "files_metadata_old.json")
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(12), ansV1.Oid)
 	assert.Equal(t, uint32(0), ansV1.Tables["t1"].Oid)
@@ -273,7 +272,7 @@ func TestFetchDtoWithFilesMetadata(t *testing.T) {
 	assert.Equal(t, uint32(0), ansV1.Tables["t2"].Relfilenode)
 
 	ansV2 := postgres.DatabaseObjectsInfo{}
-	err = internal.FetchDto(folder, &ansV2, "files_metadata_new.json")
+	err = internal.FetchDto(t.Context(), folder, &ansV2, "files_metadata_new.json")
 	assert.NoError(t, err)
 	assert.Equal(t, uint32(12), ansV2.Oid)
 	assert.Equal(t, uint32(1), ansV2.Tables["t1"].Oid)

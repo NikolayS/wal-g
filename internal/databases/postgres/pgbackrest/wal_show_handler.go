@@ -1,8 +1,10 @@
 package pgbackrest
 
 import (
+	"cmp"
+	"context"
 	"path"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/wal-g/tracelog"
@@ -10,14 +12,14 @@ import (
 	"github.com/wal-g/wal-g/pkg/storages/storage"
 )
 
-func HandleWalShow(rootFolder storage.Folder, stanza string, outputWriter postgres.WalShowOutputWriter) error {
-	archiveName, err := GetArchiveName(rootFolder, stanza)
+func HandleWalShow(ctx context.Context, rootFolder storage.Folder, stanza string, outputWriter postgres.WalShowOutputWriter) error {
+	archiveName, err := GetArchiveName(ctx, rootFolder, stanza)
 	if err != nil {
 		return err
 	}
 
 	archiveFolder := rootFolder.GetSubFolder(WalArchivePath).GetSubFolder(stanza).GetSubFolder(*archiveName)
-	walFiles, err := getWalFiles(archiveFolder)
+	walFiles, err := getWalFiles(ctx, archiveFolder)
 	if err != nil {
 		return err
 	}
@@ -30,7 +32,7 @@ func HandleWalShow(rootFolder storage.Folder, stanza string, outputWriter postgr
 
 	var timelineInfos []*postgres.TimelineInfo
 	for _, segmentsSequence := range walSequencesByTimelines {
-		historyRecords, err := postgres.GetTimeLineHistoryRecords(segmentsSequence.TimelineID, archiveFolder)
+		historyRecords, err := postgres.GetTimeLineHistoryRecords(ctx, segmentsSequence.TimelineID, archiveFolder)
 		if err != nil {
 			if _, ok := err.(postgres.HistoryFileNotFoundError); !ok {
 				tracelog.ErrorLogger.Fatalf("Error while loading .history file %v\n", err)
@@ -42,8 +44,8 @@ func HandleWalShow(rootFolder storage.Folder, stanza string, outputWriter postgr
 		timelineInfos = append(timelineInfos, info)
 	}
 
-	sort.Slice(timelineInfos, func(i, j int) bool {
-		return timelineInfos[i].ID < timelineInfos[j].ID
+	slices.SortFunc(timelineInfos, func(a, b *postgres.TimelineInfo) int {
+		return cmp.Compare(a.ID, b.ID)
 	})
 
 	return outputWriter.Write(timelineInfos)
@@ -80,15 +82,15 @@ func getWalSegments(filenames []string) ([]postgres.WalSegmentDescription, error
 	return segments, nil
 }
 
-func getWalFiles(archiveFolder storage.Folder) ([]string, error) {
+func getWalFiles(ctx context.Context, archiveFolder storage.Folder) ([]string, error) {
 	var walFiles []string
-	_, walDirectories, err := archiveFolder.ListFolder()
+	_, walDirectories, err := archiveFolder.ListFolder(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, walDirectory := range walDirectories {
-		files, _, err := walDirectory.ListFolder()
+		files, _, err := walDirectory.ListFolder(ctx)
 		if err != nil {
 			return nil, err
 		}

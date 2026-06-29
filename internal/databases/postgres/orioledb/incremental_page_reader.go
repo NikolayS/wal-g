@@ -2,11 +2,12 @@ package orioledb
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"io"
 	"os"
 
-	"github.com/RoaringBitmap/roaring"
+	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal/databases/postgres/errors"
 	"github.com/wal-g/wal-g/internal/ioextensions"
@@ -289,7 +290,8 @@ func (pageReader *incrementalPageReader) SelectNewValidPage(pageBytes []byte, bl
 	return
 }
 
-func ReadIncrementalFile(filePath string,
+func ReadIncrementalFile(ctx context.Context,
+	filePath string,
 	fileSize int64,
 	chkpNum uint32,
 	deltaBitmap *roaring.Bitmap) (fileReader io.ReadCloser, size int64, err error) {
@@ -299,7 +301,7 @@ func ReadIncrementalFile(filePath string,
 	}
 
 	fileReadSeekCloser := &ioextensions.ReadSeekCloserImpl{
-		Reader: limiters.NewDiskLimitReader(file),
+		Reader: limiters.NewDiskLimitReader(ctx, file),
 		Seeker: file,
 		Closer: file,
 	}

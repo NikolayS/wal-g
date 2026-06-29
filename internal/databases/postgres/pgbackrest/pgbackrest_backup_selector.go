@@ -1,7 +1,8 @@
 package pgbackrest
 
 import (
-	"sort"
+	"context"
+	"slices"
 
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal"
@@ -17,22 +18,22 @@ type NamedBackupSelector struct {
 	Stanza     string
 }
 
-func (selector LatestBackupSelector) Select(folder storage.Folder) (internal.Backup, error) {
-	backupList, err := GetBackupList(folder, selector.Stanza)
+func (selector LatestBackupSelector) Select(ctx context.Context, folder storage.Folder) (internal.Backup, error) {
+	backupList, err := GetBackupList(ctx, folder, selector.Stanza)
 	if err != nil {
 		return internal.Backup{}, err
 	}
-	sort.Slice(backupList, func(i, j int) bool {
-		return backupList[i].Time.Before(backupList[j].Time)
+	slices.SortFunc(backupList, func(a, b internal.BackupTime) int {
+		return a.Time.Compare(b.Time)
 	})
 
 	latest := backupList[len(backupList)-1]
 
-	return internal.NewBackupInStorage(folder, latest.BackupName, latest.StorageName)
+	return internal.NewBackupInStorage(ctx, folder, latest.BackupName, latest.StorageName)
 }
 
-func (selector NamedBackupSelector) Select(folder storage.Folder) (internal.Backup, error) {
-	backupList, err := GetBackupList(folder, selector.Stanza)
+func (selector NamedBackupSelector) Select(ctx context.Context, folder storage.Folder) (internal.Backup, error) {
+	backupList, err := GetBackupList(ctx, folder, selector.Stanza)
 	if err != nil {
 		return internal.Backup{}, err
 	}

@@ -563,9 +563,25 @@ Flags:
 - `-t, --to string` Storage config to where should copy backup
 - `-w, --with-history` If set - copy WALs older than backup finish_lsn. If not - copy only WALs from start_lsn to finish_lsn
 
+### Delete retention ordering and ``--use-sentinel-time``
+
+For PostgreSQL, ``wal-g delete retain`` and ``wal-g delete before`` sort backups using the **timeline** and WAL **segment number** parsed from the backup name (``base_<timeline>...``) unless you change that behavior.
+
+After a **major version upgrade** (for example ``pg_upgrade``) or a new data directory, the cluster timeline often **starts again at a low value** while backups from the old cluster remain in the same bucket or prefix. Then name-based order is **not** the same as real-world time: ``retain`` may keep old backups and delete **new** ones even when you meant to keep the latest *N* backups. See [issue #636](https://github.com/wal-g/wal-g/issues/636).
+
+Use the ``--use-sentinel-time`` flag on ``wal-g delete`` so WAL-G orders backups by **start time** from each backup's sentinel/metadata (when metadata is present for backups in storage). If metadata cannot be read for some backups, WAL-G **falls back** to timeline and segment ordering.
+
+**Mitigations:** prefer a **separate storage path or bucket** per major PostgreSQL version so pre- and post-upgrade backups are not mixed; always run without ``--confirm`` first to dry-run.
+
+```bash
+wal-g delete retain FULL 5 --use-sentinel-time --confirm
+```
+
 ### ``delete garbage``
 
 Deletes outdated WAL archives and backups leftover files from storage, e.g. unsuccessfully backups or partially deleted ones. Will remove all non-permanent objects before the earliest non-permanent backup. This command is useful when backups are being deleted by the `delete target` command.
+
+If there are no non-permanent backup in storage, command won`t delete anything. To bypass this check, and delete garbage anyway, use ``--without-backup-check`` flag.
 
 Usage:
 ```bash
@@ -587,18 +603,48 @@ wal-g wal-restore path/to/target-pgdata path/to/source-pgdata
 
 ### ``daemon``
 
-Archives and fetch all WAL segments in the background. Works with the PostgreSQL archive library `walg_archive` or `walg-daemon-client`.
+Long-running process that archives and fetches WAL segments in response to commands sent over a UNIX socket. The daemon stays warm so PostgreSQL avoids paying WAL-G's startup cost (config reload, storage connect) once per WAL segment.
 
 Usage:
 ```bash
-wal-g daemon path/to/socket-descriptor
+wal-g daemon path/to/socket
 ```
 
 Configuration:
 
 * `WALG_DAEMON_WAL_UPLOAD_TIMEOUT`
 
-To configure time limit for every WAL archive in daemon. Hanging for a longer time operations will be interrupted. Default value is 60s. 
+Per-archive operation time limit. Operations exceeding it are interrupted. Default `60s`.
+
+##### ``walg-daemon-client``
+
+Lightweight CLI in [`cmd/daemonclient`](https://github.com/wal-g/wal-g/tree/master/cmd/daemonclient), built via `make build_client`. Intended to be invoked from [`archive_command`](https://www.postgresql.org/docs/current/runtime-config-wal.html#GUC-ARCHIVE-COMMAND) and [`restore_command`](https://www.postgresql.org/docs/current/runtime-config-wal.html#GUC-RESTORE-COMMAND), so PostgreSQL forks the small client per segment instead of the full `wal-g` binary.
+
+Usage:
+```bash
+walg-daemon-client socket command [command_args] [-timeout duration] [-connection-timeout duration]
+```
+
+Commands:
+- `wal-push wal_filepath` — relays to `wal-g wal-push`
+- `wal-fetch wal_name destination_filename` — relays to `wal-g wal-fetch`. On a missing archive, exits `74` (`EX_IOERR`) so PostgreSQL keeps recovering rather than treating it as fatal; matches `wal-fetch` behaviour, see [PR #1195](https://github.com/wal-g/wal-g/pull/1195).
+
+`postgresql.conf` example:
+```conf
+archive_mode = on
+archive_command = 'walg-daemon-client /var/run/wal-g.sock wal-push %f'
+restore_command = 'walg-daemon-client /var/run/wal-g.sock wal-fetch %f %p'
+```
+
+##### ``walg_archive``
+
+PostgreSQL extension hosted at https://github.com/wal-g/walg_archive. Targets PostgreSQL 15+ via the [`archive_library`](https://www.postgresql.org/docs/current/runtime-config-wal.html#GUC-ARCHIVE-LIBRARY) GUC, replacing `archive_command` shell invocation with an in-process callback. Build it from that repo, install the resulting `.so`, then in `postgresql.conf`:
+```conf
+archive_mode = on
+archive_library = 'walg_archive'
+walg_archive.walg_socket = '/var/run/wal-g.sock'
+```
+`walg_archive.walg_socket` must point at the same path passed to `wal-g daemon`.
 
 pgBackRest backups support (beta version)
 -----------

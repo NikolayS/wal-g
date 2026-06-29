@@ -2,15 +2,16 @@ package blob
 
 import (
 	"bytes"
+	"cmp"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/wal-g/tracelog"
-
 	"github.com/wal-g/wal-g/pkg/storages/storage"
 )
 
@@ -46,17 +47,17 @@ type Section struct {
 	BlockSize uint64
 }
 
-func NewIndex(f storage.Folder) *Index {
+func NewIndex(ctx context.Context, f storage.Folder) *Index {
 	idx := &Index{
 		folder: f,
 		icache: make(map[string]*Block),
 	}
-	go idx.saver()
+	go idx.saver(ctx)
 	return idx
 }
 
-func (idx *Index) Load() error {
-	reader, err := idx.folder.ReadObject(IndexFileName)
+func (idx *Index) Load(ctx context.Context) error {
+	reader, err := idx.folder.ReadObject(ctx, IndexFileName)
 	if err != nil {
 		if _, ok := err.(storage.ObjectNotFoundError); ok {
 			return ErrNotFound
@@ -87,30 +88,30 @@ func (idx *Index) buildCache() {
 			idx.ocache = append(idx.ocache, b)
 		}
 	}
-	sort.Slice(idx.ocache, func(i, j int) bool {
-		return idx.ocache[i].Offset < idx.ocache[j].Offset
+	slices.SortFunc(idx.ocache, func(a, b *Block) int {
+		return cmp.Compare(a.Offset, b.Offset)
 	})
 }
 
-func (idx *Index) saver() {
+func (idx *Index) saver(ctx context.Context) {
 	for range time.NewTicker(BgSaveInterval).C {
 		idx.Lock()
 		needSave := idx.needSave
 		idx.needSave = false
 		idx.Unlock()
 		if needSave {
-			err := idx.Save()
+			err := idx.Save(ctx)
 			tracelog.ErrorLogger.PrintOnError(err)
 		}
 	}
 }
 
-func (idx *Index) Save() error {
+func (idx *Index) Save(ctx context.Context) error {
 	idx.Lock()
 	data, err := json.Marshal(idx)
 	idx.Unlock()
 	if err == nil {
-		err = idx.folder.PutObject(IndexFileName, bytes.NewBuffer(data))
+		err = idx.folder.PutObject(ctx, IndexFileName, bytes.NewBuffer(data))
 	}
 	return err
 }
@@ -136,7 +137,7 @@ func (idx *Index) PutBlock(id string, size uint64) string {
 	return fmt.Sprintf("%s.%d", block.ID, block.UploadedRev)
 }
 
-// nolint: funlen,gocyclo
+//nolint:gocyclo
 func (idx *Index) PutBlockList(xblocklist *XBlockListIn) ([]string, error) {
 	idx.Lock()
 	defer idx.Unlock()
@@ -229,8 +230,8 @@ func (idx *Index) GetBlockList(ltype string) *XBlockListOut {
 				})
 			}
 		}
-		sort.Slice(bl.UncommittedBlocks.Blocks, func(i, j int) bool {
-			return bl.UncommittedBlocks.Blocks[i].Name < bl.UncommittedBlocks.Blocks[j].Name
+		slices.SortFunc(bl.UncommittedBlocks.Blocks, func(a, b XBlockOut) int {
+			return cmp.Compare(a.Name, b.Name)
 		})
 	}
 	return &bl
@@ -298,7 +299,7 @@ func (idx *Index) GetSections(rangeMin, rangeMax uint64) []Section {
 	return sections
 }
 
-// nolint: unused
+//nolint:unused
 func (idx *Index) debugBlocks() {
 	for i, b := range idx.ocache {
 		tracelog.DebugLogger.Printf("BLK %05d %s\t %020d %08d", i, b.ID, b.Offset, b.CommittedSize)

@@ -1,13 +1,14 @@
 package greenplum
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"net"
-	"sort"
+	"slices"
 	"strings"
 
-	"github.com/greenplum-db/gp-common-go-libs/cluster"
+	"github.com/apache/cloudberry-go-libs/cluster"
 )
 
 const PgHbaTemplate = `# TYPE  DATABASE        USER            ADDRESS                 METHOD
@@ -91,7 +92,7 @@ func (m PgHbaMaker) primarySegments() []*cluster.SegConfig {
 		}
 	}
 
-	sort.Slice(primarySegments, func(i, j int) bool { return primarySegments[i].ContentID < primarySegments[j].ContentID })
+	slices.SortFunc(primarySegments, func(a, b *cluster.SegConfig) int { return cmp.Compare(a.ContentID, b.ContentID) })
 	return primarySegments
 }
 

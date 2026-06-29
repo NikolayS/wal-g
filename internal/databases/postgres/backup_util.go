@@ -1,7 +1,8 @@
 package postgres
 
 import (
-	"sort"
+	"context"
+	"slices"
 	"time"
 
 	"github.com/wal-g/wal-g/internal"
@@ -15,10 +16,10 @@ const (
 	ByModificationTime
 )
 
-func GetBackupsDetails(folder storage.Folder, backups []internal.BackupTime) ([]BackupDetail, error) {
+func GetBackupsDetails(ctx context.Context, folder storage.Folder, backups []internal.BackupTime) ([]BackupDetail, error) {
 	backupsDetails := make([]BackupDetail, 0, len(backups))
 	for i := len(backups) - 1; i >= 0; i-- {
-		details, err := GetBackupDetails(folder, backups[i])
+		details, err := GetBackupDetails(ctx, folder, backups[i])
 		if err != nil {
 			return nil, err
 		}
@@ -27,13 +28,13 @@ func GetBackupsDetails(folder storage.Folder, backups []internal.BackupTime) ([]
 	return backupsDetails, nil
 }
 
-func GetBackupDetails(folder storage.Folder, backupTime internal.BackupTime) (BackupDetail, error) {
-	backup, err := NewBackupInStorage(folder, backupTime.BackupName, backupTime.StorageName)
+func GetBackupDetails(ctx context.Context, folder storage.Folder, backupTime internal.BackupTime) (BackupDetail, error) {
+	backup, err := NewBackupInStorage(ctx, folder, backupTime.BackupName, backupTime.StorageName)
 	if err != nil {
 		return BackupDetail{}, err
 	}
 
-	metaData, err := backup.FetchMeta()
+	metaData, err := backup.FetchMeta(ctx)
 	if err != nil {
 		return BackupDetail{}, err
 	}
@@ -48,12 +49,12 @@ func SortBackupDetails(backupDetails []BackupDetail) {
 		}
 	}
 	if sortOrder == ByCreationTime {
-		sort.Slice(backupDetails, func(i, j int) bool {
-			return backupDetails[i].StartTime.Before(backupDetails[j].StartTime)
+		slices.SortFunc(backupDetails, func(a, b BackupDetail) int {
+			return a.StartTime.Compare(b.StartTime)
 		})
 	} else {
-		sort.Slice(backupDetails, func(i, j int) bool {
-			return backupDetails[i].Time.Before(backupDetails[j].Time)
+		slices.SortFunc(backupDetails, func(a, b BackupDetail) int {
+			return a.Time.Compare(b.Time)
 		})
 	}
 }

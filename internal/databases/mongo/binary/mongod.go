@@ -7,14 +7,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cenkalti/backoff"
+	"github.com/cenkalti/backoff/v5"
 	"github.com/pkg/errors"
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal"
 	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/internal/databases/mongo/archive"
 	"github.com/wal-g/wal-g/internal/databases/mongo/models"
-
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -30,21 +29,14 @@ const cursorCreateRetries = 10
 const mongoConnectRetries = 3
 
 type MongodService struct {
-	Context     context.Context
+	Context     context.Context //nolint:containedctx // long-lived mongod client connection service
 	MongoClient *mongo.Client
 }
 
 func CreateMongodService(ctx context.Context, appName, mongodbURI string, timeout time.Duration) (*MongodService, error) {
-	var repeatOptions backoff.BackOff
-	repeatOptions = backoff.NewExponentialBackOff()
-	repeatOptions = backoff.WithMaxRetries(repeatOptions, mongoConnectRetries)
-	repeatOptions = backoff.WithContext(repeatOptions, ctx)
-
-	var mongoClient *mongo.Client
-	var err error
-	err = backoff.RetryNotify(
-		func() error {
-			mongoClient, err = mongo.Connect(ctx,
+	mongoClient, err := backoff.Retry(ctx,
+		func() (*mongo.Client, error) {
+			client, err := mongo.Connect(ctx,
 				options.Client().ApplyURI(mongodbURI).
 					SetServerSelectionTimeout(timeout).
 					SetConnectTimeout(timeout).
@@ -53,18 +45,17 @@ func CreateMongodService(ctx context.Context, appName, mongodbURI string, timeou
 					SetDirect(true).
 					SetRetryReads(false))
 			if err != nil {
-				return errors.Wrap(err, "unable to connect to mongod")
+				return nil, errors.Wrap(err, "unable to connect to mongod")
 			}
-			err = mongoClient.Ping(ctx, nil)
-			if err != nil {
-				return errors.Wrap(err, "ping to mongod is failed")
+			if err := client.Ping(ctx, nil); err != nil {
+				return nil, errors.Wrap(err, "ping to mongod is failed")
 			}
-			return nil
+			return client, nil
 		},
-		repeatOptions,
-		func(err error, duration time.Duration) {
+		backoff.WithMaxTries(mongoConnectRetries+1),
+		backoff.WithNotify(func(err error, duration time.Duration) {
 			tracelog.InfoLogger.Printf("Unable to connect due '%+v', next retry: %v", err, duration)
-		},
+		}),
 	)
 	if err != nil {
 		return nil, err
@@ -77,16 +68,9 @@ func CreateMongodService(ctx context.Context, appName, mongodbURI string, timeou
 }
 
 func CreateBackgroundMongodService(ctx context.Context, appName, mongodbURI string) (*MongodService, error) {
-	var repeatOptions backoff.BackOff
-	repeatOptions = backoff.NewExponentialBackOff()
-	repeatOptions = backoff.WithMaxRetries(repeatOptions, mongoConnectRetries)
-	repeatOptions = backoff.WithContext(repeatOptions, ctx)
-
-	var mongoClient *mongo.Client
-	var err error
-	err = backoff.RetryNotify(
-		func() error {
-			mongoClient, err = mongo.Connect(ctx,
+	mongoClient, err := backoff.Retry(ctx,
+		func() (*mongo.Client, error) {
+			client, err := mongo.Connect(ctx,
 				options.Client().ApplyURI(mongodbURI).
 					SetMaxPoolSize(1).
 					SetMinPoolSize(1).
@@ -97,18 +81,17 @@ func CreateBackgroundMongodService(ctx context.Context, appName, mongodbURI stri
 					SetDirect(true).
 					SetRetryReads(false))
 			if err != nil {
-				return errors.Wrap(err, "unable to connect to mongod")
+				return nil, errors.Wrap(err, "unable to connect to mongod")
 			}
-			err = mongoClient.Ping(ctx, nil)
-			if err != nil {
-				return errors.Wrap(err, "ping to mongod is failed")
+			if err := client.Ping(ctx, nil); err != nil {
+				return nil, errors.Wrap(err, "ping to mongod is failed")
 			}
-			return nil
+			return client, nil
 		},
-		repeatOptions,
-		func(err error, duration time.Duration) {
+		backoff.WithMaxTries(mongoConnectRetries+1),
+		backoff.WithNotify(func(err error, duration time.Duration) {
 			tracelog.InfoLogger.Printf("Unable to connect due '%+v', next retry: %v", err, duration)
-		},
+		}),
 	)
 	if err != nil {
 		return nil, err
@@ -422,8 +405,8 @@ func makeBsonRsMembers(rsConfig RsConfig) bson.A {
 	return bsonMembers
 }
 
-func (mongodService *MongodService) Shutdown() error {
-	err := mongodService.MongoClient.Database(adminDB).RunCommand(context.Background(),
+func (mongodService *MongodService) Shutdown(ctx context.Context) error {
+	err := mongodService.MongoClient.Database(adminDB).RunCommand(ctx,
 		bson.D{{Key: "shutdown", Value: 1}},
 	).Err()
 	if err != nil && !strings.Contains(err.Error(), "socket was unexpectedly closed") {
@@ -520,6 +503,7 @@ func NewShConfig(shardName string, connectionString string) ShConfig {
 }
 
 func NewReplyOplogConfig(
+	ctx context.Context,
 	sincePitrStr, untilPitrStr string, partial, withCatchUpReconfig bool, minimalConfigPath string,
 ) (ReplyOplogConfig, error) {
 	var roConfig ReplyOplogConfig
@@ -527,15 +511,15 @@ func NewReplyOplogConfig(
 	roConfig.HasPitr = true
 
 	// resolve archiving settings
-	downloader, err := archive.NewStorageDownloader(archive.NewDefaultStorageSettings())
+	downloader, err := archive.NewStorageDownloader(ctx, archive.NewDefaultStorageSettings())
 	if err != nil {
 		return roConfig, err
 	}
-	roConfig.Since, err = processTimestamp(sincePitrStr, downloader)
+	roConfig.Since, err = processTimestamp(ctx, sincePitrStr, downloader)
 	if err != nil {
 		return roConfig, err
 	}
-	roConfig.Until, err = processTimestamp(untilPitrStr, downloader)
+	roConfig.Until, err = processTimestamp(ctx, untilPitrStr, downloader)
 	if err != nil {
 		return roConfig, err
 	}
@@ -565,16 +549,16 @@ func NewReplyOplogConfig(
 	return roConfig, err
 }
 
-func processTimestamp(arg string, downloader *archive.StorageDownloader) (models.Timestamp, error) {
+func processTimestamp(ctx context.Context, arg string, downloader *archive.StorageDownloader) (models.Timestamp, error) {
 	switch arg {
 	case internal.LatestString:
-		return downloader.LastKnownArchiveTS()
+		return downloader.LastKnownArchiveTS(ctx)
 	case LatestBackupString:
-		lastBackupName, err := downloader.LastBackupName()
+		lastBackupName, err := downloader.LastBackupName(ctx)
 		if err != nil {
 			return models.Timestamp{}, err
 		}
-		backupMeta, err := downloader.BackupMeta(lastBackupName)
+		backupMeta, err := downloader.BackupMeta(ctx, lastBackupName)
 		if err != nil {
 			return models.Timestamp{}, err
 		}

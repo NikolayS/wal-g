@@ -3,7 +3,6 @@ package mysql
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 
+	"github.com/go-mysql-org/go-mysql/client"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/pkg/errors"
 	"github.com/wal-g/tracelog"
@@ -26,18 +26,18 @@ type LogsCache struct {
 
 //gocyclo:ignore
 //nolint:funlen
-func HandleBinlogPush(uploader internal.Uploader, untilBinlog string, checkGTIDs bool) {
+func HandleBinlogPush(ctx context.Context, uploader internal.Uploader, untilBinlog string, checkGTIDs bool) {
 	rootFolder := uploader.Folder()
 	uploader.ChangeDirectory(BinlogPath)
 
-	db, err := getMySQLConnection()
+	conn, err := getMySQLConnection(ctx)
 	tracelog.ErrorLogger.FatalOnError(err)
-	defer utility.LoggedClose(db, "")
+	defer utility.LoggedClose(conn, "")
 
-	binlogsFolder, err := getMySQLBinlogsFolder(db)
+	binlogsFolder, err := getMySQLBinlogsFolder(conn)
 	tracelog.ErrorLogger.FatalOnError(err)
 
-	binlogs, err := getMySQLBinlogs(db)
+	binlogs, err := getMySQLBinlogs(conn)
 	tracelog.ErrorLogger.FatalOnError(err)
 
 	lastBinlog := lastOrDefault(binlogs, "")
@@ -46,7 +46,7 @@ func HandleBinlogPush(uploader internal.Uploader, untilBinlog string, checkGTIDs
 	}
 
 	var binlogSentinelDto BinlogSentinelDto
-	err = FetchBinlogSentinel(rootFolder, &binlogSentinelDto)
+	err = FetchBinlogSentinel(ctx, rootFolder, &binlogSentinelDto)
 	if err == nil && binlogSentinelDto.GTIDArchived != "" {
 		tracelog.InfoLogger.Printf("fetched binlog archived GTID SET: %s\n", binlogSentinelDto.GTIDArchived)
 	}
@@ -62,7 +62,7 @@ func HandleBinlogPush(uploader internal.Uploader, untilBinlog string, checkGTIDs
 
 	var filter gtidFilter
 	if checkGTIDs {
-		flavor, err := getMySQLFlavor(db)
+		flavor, err := getMySQLFlavor(conn)
 		tracelog.ErrorLogger.FatalOnError(err)
 
 		switch flavor {
@@ -119,7 +119,7 @@ func HandleBinlogPush(uploader internal.Uploader, untilBinlog string, checkGTIDs
 		}
 
 		// Upload binlogs:
-		err = archiveBinLog(uploader, binlogsFolder, binlog)
+		err = archiveBinLog(ctx, uploader, binlogsFolder, binlog)
 		tracelog.ErrorLogger.FatalOnError(err)
 
 		cache.LastArchivedBinlog = binlog
@@ -129,7 +129,7 @@ func HandleBinlogPush(uploader internal.Uploader, untilBinlog string, checkGTIDs
 		if checkGTIDs && filter.isValid() {
 			binlogSentinelDto.GTIDArchived = filter.gtidArchived.String()
 			tracelog.InfoLogger.Printf("Uploading binlog sentinel: %s", binlogSentinelDto)
-			err := UploadBinlogSentinel(rootFolder, &binlogSentinelDto)
+			err := UploadBinlogSentinel(ctx, rootFolder, &binlogSentinelDto)
 			tracelog.ErrorLogger.FatalOnError(err)
 		}
 	}
@@ -138,13 +138,16 @@ func HandleBinlogPush(uploader internal.Uploader, untilBinlog string, checkGTIDs
 	putCache(cache)
 }
 
-func getMySQLBinlogs(db *sql.DB) ([]string, error) {
+func getMySQLBinlogs(conn *client.Conn) ([]string, error) {
 	var result []string
 	// SHOW BINARY LOGS acquire binlog mutex and may hang while mysql is committing huge transactions
 	// so we read binlog index from the disk with no locking
-	row := db.QueryRow("SELECT @@log_bin_index")
-	var binlogIndex string
-	err := row.Scan(&binlogIndex)
+	r, err := conn.Execute("SELECT @@log_bin_index")
+	if err != nil {
+		return nil, fmt.Errorf("failed to query mysql variable: %w", err)
+	}
+	defer r.Close()
+	binlogIndex, err := r.GetString(0, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query mysql variable: %w", err)
 	}
@@ -161,17 +164,20 @@ func getMySQLBinlogs(db *sql.DB) ([]string, error) {
 	return result, nil
 }
 
-func getMySQLBinlogsFolder(db *sql.DB) (string, error) {
-	row := db.QueryRow("SHOW VARIABLES LIKE 'log_bin_basename'")
-	var nonce, logBinBasename string
-	err := row.Scan(&nonce, &logBinBasename)
+func getMySQLBinlogsFolder(conn *client.Conn) (string, error) {
+	r, err := conn.Execute("SHOW VARIABLES LIKE 'log_bin_basename'")
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+	logBinBasename, err := r.GetString(0, 1)
 	if err != nil {
 		return "", err
 	}
 	return path.Dir(logBinBasename), nil
 }
 
-func archiveBinLog(uploader internal.Uploader, dataDir string, binlog string) error {
+func archiveBinLog(ctx context.Context, uploader internal.Uploader, dataDir string, binlog string) error {
 	tracelog.InfoLogger.Printf("Archiving %v\n", binlog)
 
 	filename := path.Join(dataDir, binlog)
@@ -180,7 +186,7 @@ func archiveBinLog(uploader internal.Uploader, dataDir string, binlog string) er
 		return errors.Wrapf(err, "upload: could not open '%s'\n", filename)
 	}
 	defer utility.LoggedClose(walFile, "")
-	err = uploader.UploadFile(context.Background(), walFile)
+	err = uploader.UploadFile(ctx, walFile)
 	if err != nil {
 		return errors.Wrapf(err, "upload: could not upload '%s'\n", filename)
 	}

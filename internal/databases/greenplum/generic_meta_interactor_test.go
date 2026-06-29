@@ -58,10 +58,8 @@ func TestFetch(t *testing.T) {
 	}
 
 	folder := testtools.MakeDefaultInMemoryStorageFolder()
-	marshaller, _ := internal.NewDtoSerializer()
-	file, _ := marshaller.Marshal(testObject)
-	_ = folder.PutObject(internal.SentinelNameFromBackup(backupName), file)
-	actualResult, err := greenplum.NewGenericMetaFetcher().Fetch(backupName, folder)
+	_ = internal.UploadDto(t.Context(), folder, testObject, internal.SentinelNameFromBackup(backupName))
+	actualResult, err := greenplum.NewGenericMetaFetcher().Fetch(t.Context(), backupName, folder)
 
 	//check equality of time separately
 	isEqualTimeStart := expectedResult.StartTime.Equal(actualResult.StartTime)
@@ -96,12 +94,10 @@ func TestSetIsPermanent(t *testing.T) {
 	}
 
 	folder := testtools.MakeDefaultInMemoryStorageFolder()
-	marshaller, _ := internal.NewDtoSerializer()
-	file, _ := marshaller.Marshal(testObject)
-	_ = folder.PutObject(internal.SentinelNameFromBackup(backupName), file)
+	_ = internal.UploadDto(t.Context(), folder, testObject, internal.SentinelNameFromBackup(backupName))
 
-	_ = greenplum.NewGenericMetaSetter().SetIsPermanent(backupName, folder, true)
-	backup, err := greenplum.NewGenericMetaFetcher().Fetch(backupName, folder)
+	_ = greenplum.NewGenericMetaSetter().SetIsPermanent(t.Context(), backupName, folder, true)
+	backup, err := greenplum.NewGenericMetaFetcher().Fetch(t.Context(), backupName, folder)
 
 	assert.NoError(t, err)
 	assert.True(t, backup.IsPermanent)
@@ -127,13 +123,11 @@ func TestSetUserData(t *testing.T) {
 	}
 
 	folder := testtools.MakeDefaultInMemoryStorageFolder()
-	marshaller, _ := internal.NewDtoSerializer()
-	file, _ := marshaller.Marshal(testObject)
-	_ = folder.PutObject(internal.SentinelNameFromBackup(backupName), file)
+	_ = internal.UploadDto(t.Context(), folder, testObject, internal.SentinelNameFromBackup(backupName))
 
-	_ = greenplum.NewGenericMetaSetter().SetUserData(backupName, folder, updatedData)
+	_ = greenplum.NewGenericMetaSetter().SetUserData(t.Context(), backupName, folder, updatedData)
 
-	backup, err := greenplum.NewGenericMetaFetcher().Fetch(backupName, folder)
+	backup, err := greenplum.NewGenericMetaFetcher().Fetch(t.Context(), backupName, folder)
 
 	assert.NoError(t, err)
 	assert.Equal(t, updatedData, backup.UserData)

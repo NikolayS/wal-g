@@ -1,13 +1,13 @@
 package greenplum
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/wal-g/tracelog"
-
 	"github.com/wal-g/wal-g/internal"
 	"github.com/wal-g/wal-g/internal/printlist"
 	"github.com/wal-g/wal-g/pkg/storages/storage"
@@ -108,20 +108,20 @@ func (bd *BackupDetail) PrintableFields() []printlist.TableField {
 }
 
 // ListStorageBackups returns the list of storage backups sorted by finish time (in ascending order)
-func ListStorageBackups(folder storage.Folder) ([]Backup, error) {
-	backupObjects, err := internal.GetBackups(folder.GetSubFolder(utility.BaseBackupPath))
+func ListStorageBackups(ctx context.Context, folder storage.Folder) ([]Backup, error) {
+	backupObjects, err := internal.GetBackups(ctx, folder.GetSubFolder(utility.BaseBackupPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch list of backups in storage: %w", err)
 	}
 
 	backups := make([]Backup, 0, len(backupObjects))
 	for _, b := range backupObjects {
-		backup, err := NewBackupInStorage(folder, b.BackupName, b.StorageName)
+		backup, err := NewBackupInStorage(ctx, folder, b.BackupName, b.StorageName)
 		if err != nil {
 			return nil, err
 		}
 
-		_, err = backup.GetSentinel()
+		_, err = backup.GetSentinel(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load sentinel for backup %s: %w", b.BackupName, err)
 		}
@@ -129,8 +129,8 @@ func ListStorageBackups(folder storage.Folder) ([]Backup, error) {
 		backups = append(backups, backup)
 	}
 
-	sort.Slice(backups, func(i, j int) bool {
-		return backups[i].SentinelDto.FinishTime.Before(backups[j].SentinelDto.FinishTime)
+	slices.SortFunc(backups, func(a, b Backup) int {
+		return a.SentinelDto.FinishTime.Compare(b.SentinelDto.FinishTime)
 	})
 
 	return backups, nil
@@ -144,8 +144,8 @@ func MakeBackupDetails(backups []Backup) []BackupDetail {
 	return details
 }
 
-func HandleDetailedBackupList(folder storage.Folder, pretty, json bool) {
-	backups, err := ListStorageBackups(folder)
+func HandleDetailedBackupList(ctx context.Context, folder storage.Folder, pretty, json bool) {
+	backups, err := ListStorageBackups(ctx, folder)
 	err = internal.FilterOutNoBackupFoundError(err, json)
 	tracelog.ErrorLogger.FatalOnError(err)
 

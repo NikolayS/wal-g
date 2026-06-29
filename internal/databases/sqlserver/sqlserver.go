@@ -1,6 +1,7 @@
 package sqlserver
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -12,18 +13,17 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
-	"golang.org/x/xerrors"
-
 	"github.com/wal-g/tracelog"
-
 	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/internal/databases/sqlserver/blob"
 	"github.com/wal-g/wal-g/pkg/storages/storage"
 	"github.com/wal-g/wal-g/utility"
+	"golang.org/x/xerrors"
 )
 
 const AllDatabases = "ALL"
@@ -249,8 +249,8 @@ func buildRestoreUrls(baseURL string, blobNames []string) string {
 }
 
 func buildPhysicalFileMove(files []DatabaseFile, dbname string, datadir string, logdir string) (string, error) {
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].FileID < files[j].FileID
+	slices.SortFunc(files, func(a, b DatabaseFile) int {
+		return cmp.Compare(a.FileID, b.FileID)
 	})
 	res := ""
 	dataFileCnt := 0
@@ -334,22 +334,19 @@ func getLogBackupURL(logBackupName, dbname string) string {
 	return fmt.Sprintf("https://%s/%s", hostname, getLogBackupPath(logBackupName, dbname))
 }
 
-func doesLogBackupContainDB(folder storage.Folder, logBakupName string, dbname string) (bool, error) {
+func doesLogBackupContainDB(ctx context.Context, folder storage.Folder, logBakupName string, dbname string) (bool, error) {
 	f := folder.GetSubFolder(utility.WalPath).GetSubFolder(logBakupName)
-	_, dbDirs, err := f.ListFolder()
+	_, dbDirs, err := f.ListFolder(ctx)
 	if err != nil {
 		return false, err
 	}
-	for _, dbDir := range dbDirs {
-		if dbname == path.Base(dbDir.GetPath()) {
-			return true, nil
-		}
-	}
-	return false, nil
+	return slices.ContainsFunc(dbDirs, func(d storage.Folder) bool {
+		return dbname == path.Base(d.GetPath())
+	}), nil
 }
 
-func listBackupBlobs(folder storage.Folder) ([]string, error) {
-	ok, err := folder.Exists(blob.IndexFileName)
+func listBackupBlobs(ctx context.Context, folder storage.Folder) ([]string, error) {
+	ok, err := folder.Exists(ctx, blob.IndexFileName)
 	if err != nil {
 		return nil, err
 	}
@@ -357,7 +354,7 @@ func listBackupBlobs(folder storage.Folder) ([]string, error) {
 		// old-style single blob backup
 		return nil, nil
 	}
-	_, blobDirs, err := folder.ListFolder()
+	_, blobDirs, err := folder.ListFolder(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -372,13 +369,13 @@ func listBackupBlobs(folder storage.Folder) ([]string, error) {
 	return blobs, nil
 }
 
-func getLogsSinceBackup(folder storage.Folder, backupName string, stopAt time.Time) ([]string, error) {
+func getLogsSinceBackup(ctx context.Context, folder storage.Folder, backupName string, stopAt time.Time) ([]string, error) {
 	if !strings.HasPrefix(backupName, utility.BackupNamePrefix) {
 		return nil, fmt.Errorf("unexpected backup name: %s", backupName)
 	}
 	startTS := backupName[len(utility.BackupNamePrefix):]
 	endTS := stopAt.Format(utility.BackupTimeFormat)
-	_, logBackups, err := folder.GetSubFolder(utility.WalPath).ListFolder()
+	_, logBackups, err := folder.GetSubFolder(utility.WalPath).ListFolder(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -482,7 +479,8 @@ type BackupProperties struct {
 	BackupFile        string
 }
 
-func GetBackupProperties(db *sql.DB,
+func GetBackupProperties(ctx context.Context,
+	db *sql.DB,
 	folder storage.Folder,
 	logBackup bool,
 	backupName string,
@@ -498,7 +496,7 @@ func GetBackupProperties(db *sql.DB,
 		baseURL = getDatabaseBackupURL(backupName, databaseName)
 		basePath = getDatabaseBackupPath(backupName, databaseName)
 	}
-	blobs, err := listBackupBlobs(folder.GetSubFolder(basePath))
+	blobs, err := listBackupBlobs(ctx, folder.GetSubFolder(basePath))
 	if err != nil {
 		return res, err
 	}

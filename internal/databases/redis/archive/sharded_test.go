@@ -4,10 +4,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/golang/mock/gomock"
+	"go.uber.org/mock/gomock"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
-
 	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/internal/databases/redis/archive/mocks"
 )
