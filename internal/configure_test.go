@@ -70,15 +70,10 @@ func TestGetDataFolderPath_Default(t *testing.T) {
 }
 
 func TestGetDataFolderPath_CwdWal(t *testing.T) {
-	pgEnv, pgEnvSet := os.LookupEnv(config.PgDataSetting)
+	t.Setenv(config.PgDataSetting, "") // restores the real PGDATA after the test
 	os.Unsetenv(config.PgDataSetting)
-	defer func() {
-		if pgEnvSet {
-			os.Setenv(config.PgDataSetting, pgEnv)
-		}
-		resetToDefaults()
-	}()
 	resetToDefaults()
+	defer resetToDefaults()
 	viper.Set(config.PgDataSetting, nil)
 
 	pgdata := t.TempDir()
@@ -93,15 +88,10 @@ func TestGetDataFolderPath_CwdWal(t *testing.T) {
 }
 
 func TestGetDataFolderPath_CwdWithoutWal(t *testing.T) {
-	pgEnv, pgEnvSet := os.LookupEnv(config.PgDataSetting)
+	t.Setenv(config.PgDataSetting, "") // restores the real PGDATA after the test
 	os.Unsetenv(config.PgDataSetting)
-	defer func() {
-		if pgEnvSet {
-			os.Setenv(config.PgDataSetting, pgEnv)
-		}
-		resetToDefaults()
-	}()
 	resetToDefaults()
+	defer resetToDefaults()
 	viper.Set(config.PgDataSetting, nil)
 
 	t.Chdir(t.TempDir())
