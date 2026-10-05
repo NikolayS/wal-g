@@ -7,6 +7,7 @@ import (
 
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal"
+	"github.com/wal-g/wal-g/internal/databases/greenplum/ao"
 	"github.com/wal-g/wal-g/internal/databases/greenplum/pax"
 	"github.com/wal-g/wal-g/internal/databases/postgres"
 	"github.com/wal-g/wal-g/pkg/storages/storage"
@@ -39,7 +40,7 @@ func (t FilesToExtractProviderImpl) Get(ctx context.Context, backup SegBackup, f
 				tracelog.InfoLogger.Printf("Don't need to unwrap the %s AO segment file, skipping it...", extractPath)
 				continue
 			}
-			objPath := path.Join(AoStoragePath, meta.StoragePath)
+			objPath := path.Join(ao.StoragePath, meta.StoragePath)
 			readerMaker := internal.NewRegularFileStorageReaderMarker(backup.Folder, objPath, extractPath, meta.FileMode)
 			concurrentTarsToExtract = append(concurrentTarsToExtract, readerMaker)
 		}
@@ -55,13 +56,14 @@ func (t FilesToExtractProviderImpl) Get(ctx context.Context, backup SegBackup, f
 		tracelog.DebugLogger.Printf("PAX files metadata was not found. Skipping PAX file unpacking.")
 	} else {
 		tracelog.InfoLogger.Printf("PAX files metadata found. Will perform PAX file unpacking.")
-		for extractPath, meta := range paxMeta.Files {
+		for extractPath := range paxMeta.Files {
 			if filesToUnwrap != nil && !filesToUnwrap[extractPath] {
 				tracelog.InfoLogger.Printf("Don't need to unwrap the %s PAX file, skipping it...", extractPath)
 				continue
 			}
-			objPath := path.Join(pax.StoragePath, meta.StoragePath)
-			readerMaker := internal.NewRegularFileStorageReaderMarker(backup.Folder, objPath, extractPath, meta.FileMode)
+			fileMeta := paxMeta.Files[extractPath]
+			objPath := path.Join(pax.StoragePath, fileMeta.StoragePath)
+			readerMaker := internal.NewRegularFileStorageReaderMarker(backup.Folder, objPath, extractPath, fileMeta.FileMode)
 			concurrentTarsToExtract = append(concurrentTarsToExtract, readerMaker)
 		}
 	}

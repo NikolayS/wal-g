@@ -17,6 +17,7 @@ import (
 	"github.com/wal-g/wal-g/internal"
 	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/internal/databases/postgres"
+	"github.com/wal-g/wal-g/pkg/storages/storage"
 	"github.com/wal-g/wal-g/utility"
 )
 
@@ -40,6 +41,9 @@ type BackupArguments struct {
 	segPollRetries  int
 
 	deltaBaseSelector internal.BackupSelector
+	countJournals     bool
+	json              bool
+	pretty            bool
 }
 
 type SegmentUserData struct {
@@ -174,6 +178,10 @@ func (bh *BackupHandler) HandleBackupPush(ctx context.Context) {
 	bh.currBackupInfo.startTime = utility.TimeNowCrossPlatformUTC()
 	initGpLog(bh.arguments.logsDir)
 
+	// Must capture before uploadSentinel: it calls uploader.ChangeDirectory(basebackups_005),
+	// which mutates the uploader's stored folder in place.
+	rootFolder := bh.workers.Uploader.Folder()
+
 	err := bh.checkPrerequisites(ctx)
 	tracelog.ErrorLogger.FatalfOnError("Backup prerequisites check failed: %v\n", err)
 
@@ -210,7 +218,8 @@ func (bh *BackupHandler) HandleBackupPush(ctx context.Context) {
 		bh.abortBackup(ctx)
 	}
 
-	restoreLSNs, _, err := createRestorePoint(ctx, bh.workers.Conn, bh.currBackupInfo.backupName)
+	restoreLSNs, timeLine, timelineBySegment, err := createRestorePoint(
+		ctx, bh.workers.Conn, bh.currBackupInfo.backupName)
 	tracelog.ErrorLogger.FatalOnError(err)
 
 	bh.currBackupInfo.segmentsMetadata, err = bh.fetchSegmentBackupsMetadata(ctx)
@@ -226,28 +235,89 @@ func (bh *BackupHandler) HandleBackupPush(ctx context.Context) {
 		tracelog.ErrorLogger.FatalError(err)
 	}
 
-	err = bh.uploadRestorePointMetadata(ctx, restoreLSNs)
+	err = bh.uploadRestorePointMetadata(ctx, restoreLSNs, timeLine, timelineBySegment)
 	tracelog.ErrorLogger.FatalOnError(err)
+
+	bh.handleSharedSize(ctx, rootFolder)
+	bh.handleJournalInfo(ctx, rootFolder)
 
 	tracelog.InfoLogger.Printf("Backup %s successfully created", bh.currBackupInfo.backupName)
 	bh.disconnect(ctx)
 }
 
-func (bh *BackupHandler) uploadRestorePointMetadata(ctx context.Context, restoreLSNs map[int]string) (err error) {
+// handleSharedSize maintains the cluster-wide shared size objects, holding the volume this backup
+// added to the AO/AOCS and PAX storages shared between backups. The per-segment volumes it sums up
+// are recorded in the files metadata the segment WAL-G instances write during seg-backup-push, so
+// this runs once they have all finished.
+func (bh *BackupHandler) handleSharedSize(ctx context.Context, rootFolder storage.Folder) {
+	if err := UploadSharedSizes(ctx, rootFolder, bh.currBackupInfo.backupName); err != nil {
+		tracelog.WarningLogger.Printf("can not record the shared storage size: %s", err.Error())
+		return
+	}
+
+	tracelog.InfoLogger.Printf("uploaded shared size info for %s", bh.currBackupInfo.backupName)
+}
+
+// handleJournalInfo maintains the cluster-wide journal_<backup> object, holding the WAL volume all
+// segments accumulated between this backup and the next one. It sums the per-segment journals, so
+// it must run after the segments have finished (see UpdateClusterIntervalSize).
+func (bh *BackupHandler) handleJournalInfo(ctx context.Context, rootFolder storage.Folder) {
+	if !bh.arguments.countJournals {
+		tracelog.InfoLogger.Printf("WAL journal counting mode is disabled: option is disabled")
+		return
+	}
+	if bh.arguments.isPermanent {
+		tracelog.InfoLogger.Printf("WAL journal counting mode is disabled: the backup is permanent")
+		return
+	}
+
+	mostRecentJournalInfo, err := internal.GetMostRecentJournalInfo(ctx, rootFolder, ClusterJournalDir)
+	if err != nil {
+		tracelog.WarningLogger.Printf("can not find the last journal info: %s", err.Error())
+	}
+
+	journalInfo := internal.NewEmptyJournalInfo(
+		bh.currBackupInfo.backupName,
+		mostRecentJournalInfo.CurrentBackupEnd,
+		bh.currBackupInfo.finishTime,
+		ClusterJournalDir,
+	)
+
+	if err := journalInfo.Upload(ctx, rootFolder); err != nil {
+		tracelog.WarningLogger.Printf("can not upload the journal info: %s", err.Error())
+		return
+	}
+
+	if err := UpdateClusterIntervalSize(ctx, rootFolder, journalInfo); err != nil {
+		tracelog.WarningLogger.Printf("can not calculate journal size: %s", err.Error())
+		return
+	}
+
+	tracelog.InfoLogger.Printf("uploaded journal info for %s", bh.currBackupInfo.backupName)
+}
+
+func (bh *BackupHandler) uploadRestorePointMetadata(
+	ctx context.Context,
+	restoreLSNs map[int]string,
+	timeLine uint32,
+	timelineBySegment map[int]uint32,
+) (err error) {
 	hostname, err := os.Hostname()
 	if err != nil {
 		tracelog.WarningLogger.Printf("Failed to fetch the hostname for metadata, leaving empty: %v", err)
 	}
 
 	meta := RestorePointMetadata{
-		Name:             bh.currBackupInfo.backupName,
-		StartTime:        bh.currBackupInfo.startTime,
-		FinishTime:       bh.currBackupInfo.finishTime,
-		Hostname:         hostname,
-		GpVersion:        bh.currBackupInfo.gpVersion.String(),
-		GpFlavor:         bh.currBackupInfo.gpVersion.Flavor.String(),
-		SystemIdentifier: bh.currBackupInfo.systemIdentifier,
-		LsnBySegment:     restoreLSNs,
+		Name:              bh.currBackupInfo.backupName,
+		StartTime:         bh.currBackupInfo.startTime,
+		FinishTime:        bh.currBackupInfo.finishTime,
+		Hostname:          hostname,
+		GpVersion:         bh.currBackupInfo.gpVersion.String(),
+		GpFlavor:          bh.currBackupInfo.gpVersion.Flavor.String(),
+		SystemIdentifier:  bh.currBackupInfo.systemIdentifier,
+		LsnBySegment:      restoreLSNs,
+		TimeLine:          timeLine,
+		TimelineBySegment: timelineBySegment,
 	}
 
 	metaFileName := RestorePointMetadataFileName(meta.Name)
@@ -289,7 +359,6 @@ func (bh *BackupHandler) waitSegmentBackups() error {
 	}
 }
 
-// TODO: unit tests
 func (bh *BackupHandler) checkBackupStates(states map[int]SegCmdState) (int, error) {
 	runningBackupsCount := 0
 
@@ -510,15 +579,11 @@ func getGpClusterInfo(ctx context.Context, conn *pgx.Conn) (
 		return globalCluster, Version{}, nil, err
 	}
 
-	versionStr, err := queryRunner.GetGreenplumVersion(ctx)
+	version, err = queryRunner.GetGreenplumVersion(ctx)
 	if err != nil {
 		return globalCluster, Version{}, nil, err
 	}
-	tracelog.InfoLogger.Printf("Greenplum version: %s", versionStr)
-	version, err = parseGreenplumVersion(versionStr)
-	if err != nil {
-		return globalCluster, Version{}, nil, err
-	}
+	tracelog.InfoLogger.Printf("Greenplum version: %s", version)
 
 	segConfigs, err := queryRunner.GetGreenplumSegmentsInfo(ctx)
 	if err != nil {
@@ -566,7 +631,8 @@ func NewBackupHandler(ctx context.Context, arguments BackupArguments) (bh *Backu
 
 // NewBackupArguments creates a BackupArgument object to hold the arguments from the cmd
 func NewBackupArguments(uploader internal.Uploader, isPermanent, isFull bool, userData interface{}, fwdArgs []SegmentFwdArg, logsDir string,
-	segPollInterval time.Duration, segPollRetries int, deltaBaseSelector internal.BackupSelector) BackupArguments {
+	segPollInterval time.Duration, segPollRetries int, deltaBaseSelector internal.BackupSelector,
+	countJournals bool, pretty bool, json bool) BackupArguments {
 	return BackupArguments{
 		Uploader:          uploader,
 		isPermanent:       isPermanent,
@@ -577,6 +643,9 @@ func NewBackupArguments(uploader internal.Uploader, isPermanent, isFull bool, us
 		segPollInterval:   segPollInterval,
 		segPollRetries:    segPollRetries,
 		deltaBaseSelector: deltaBaseSelector,
+		countJournals:     countJournals,
+		pretty:            false,
+		json:              false,
 	}
 }
 

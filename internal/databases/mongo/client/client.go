@@ -5,16 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"time"
 
 	"github.com/mongodb/mongo-tools/common/db"
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal/databases/mongo/models"
 	"github.com/wal-g/wal-g/utility"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 var (
@@ -53,8 +53,8 @@ type CmdResponse struct {
 
 // Optime ...
 type OpTime struct {
-	TS   primitive.Timestamp `bson:"ts" json:"ts"`
-	Term int64               `bson:"t" json:"t"`
+	TS   bson.Timestamp `bson:"ts" json:"ts"`
+	Term int64          `bson:"t" json:"t"`
 }
 
 // IsMasterLastWrite ...
@@ -80,9 +80,12 @@ type MongoDriver interface {
 	LastWriteTS(ctx context.Context) (lastTS, lastMajTS models.Timestamp, err error)
 	TailOplogFrom(ctx context.Context, from models.Timestamp) (OplogCursor, error)
 	ApplyOp(ctx context.Context, op *db.Oplog) error
+	ApplyOps(ctx context.Context, ops []*db.Oplog) error
+	Fsync(ctx context.Context) error
 	Close(ctx context.Context, shutdown bool) error
 	ChangeOplogLastTimestamp(ctx context.Context, opTime models.OpTime) error
 	LastOplogTS(ctx context.Context) (lastTS models.Timestamp, err error)
+	CatchUpStartTS(ctx context.Context) (models.Timestamp, error)
 }
 
 // OplogCursor defines methods to work with mongodb cursor.
@@ -133,14 +136,36 @@ func (m *MongoOplogCursor) Next(ctx context.Context) bool {
 
 // ApplyOplog is used to replay oplog entry.
 type ApplyOplog struct {
-	Operation  string            `bson:"op"`
-	Namespace  string            `bson:"ns"`
-	Object     bson.D            `bson:"o"`
-	Query      bson.D            `bson:"o2,omitempty"`
-	UI         *primitive.Binary `bson:"ui,omitempty"`
-	LSID       bson.Raw          `bson:"lsid,omitempty"`
-	TxnNumber  *int64            `bson:"txnNumber,omitempty"`
-	PrevOpTime bson.Raw          `bson:"prevOpTime,omitempty"`
+	Operation  string       `bson:"op"`
+	Namespace  string       `bson:"ns"`
+	Object     bson.D       `bson:"o"`
+	Query      bson.D       `bson:"o2,omitempty"`
+	UI         *bson.Binary `bson:"ui,omitempty"`
+	LSID       bson.Raw     `bson:"lsid,omitempty"`
+	TxnNumber  *int64       `bson:"txnNumber,omitempty"`
+	PrevOpTime bson.Raw     `bson:"prevOpTime,omitempty"`
+}
+
+type applyOpsResponse struct {
+	Ok      int    `bson:"ok"`
+	ErrMsg  string `bson:"errmsg"`
+	Applied int    `bson:"applied"`
+	Results []bool `bson:"results"`
+}
+
+func (r applyOpsResponse) check(expected int) error {
+	if r.Ok != 1 {
+		return fmt.Errorf("applyOps command failed: %s", r.ErrMsg)
+	}
+	if r.Applied != expected || len(r.Results) != expected {
+		return fmt.Errorf("applyOps applied %d of %d entries and returned %d results", r.Applied, expected, len(r.Results))
+	}
+	for i, applied := range r.Results {
+		if !applied {
+			return fmt.Errorf("applyOps failed at entry %d of %d", i+1, expected)
+		}
+	}
+	return nil
 }
 
 // MongoClient implements MongoDriver
@@ -193,7 +218,7 @@ func NewMongoClient(ctx context.Context, uri string, setters ...Option) (*MongoC
 		applyOpsCmd = append(applyOpsCmd, bson.E{Key: "alwaysUpsert", Value: *args.OplogAlwaysUpsert})
 	}
 
-	client, err := mongo.Connect(ctx,
+	client, err := mongo.Connect(
 		options.Client().ApplyURI(uri).
 			SetAppName(driverAppName).
 			SetDirect(true).
@@ -210,9 +235,8 @@ func NewMongoClient(ctx context.Context, uri string, setters ...Option) (*MongoC
 
 // IndexDocument holds information about a collection's index.
 type IndexDocument struct {
-	Options                 bson.M `bson:",inline"`
-	Key                     bson.D `bson:"key"`
-	PartialFilterExpression bson.D `bson:"partialFilterExpression,omitempty"`
+	Options bson.M `bson:",inline"`
+	Key     bson.D `bson:"key"`
 }
 
 func (mc *MongoClient) CreateIndexes(ctx context.Context, dbName, collName string, indexes []IndexDocument) error {
@@ -230,8 +254,7 @@ func (mc *MongoClient) CreateIndexes(ctx context.Context, dbName, collName strin
 
 func (mc *MongoClient) DropIndexes(ctx context.Context, dbName string, rawCommand bson.D) error {
 	if err := mc.c.Database(dbName).RunCommand(ctx, rawCommand).Err(); err != nil {
-		var mongoErr mongo.CommandError
-		isMongoErr := errors.As(err, &mongoErr)
+		mongoErr, isMongoErr := errors.AsType[mongo.CommandError](err)
 
 		if isMongoErr && mongoErr.Name == "BackgroundOperationInProgressForNamespace" {
 			// In Mongo versions Prior to 5.2, an attempt to drop an index during an in-progress build of another index
@@ -304,6 +327,38 @@ func (mc *MongoClient) LastOplogTS(ctx context.Context) (lastTS models.Timestamp
 	return models.TimestampFromBson(op.Timestamp), nil
 }
 
+// CatchUpStartTS returns the last point known to be applied to the data files.
+func (mc *MongoClient) CatchUpStartTS(ctx context.Context) (models.Timestamp, error) {
+	lastOplogTS, err := mc.LastOplogTS(ctx)
+	if err != nil {
+		return models.Timestamp{}, err
+	}
+
+	var minValid struct {
+		AppliedThrough *struct {
+			TS bson.Timestamp `bson:"ts"`
+		} `bson:"appliedThrough"`
+	}
+	err = mc.c.Database(oplogDatabaseName).
+		Collection("replset.minvalid").
+		FindOne(ctx, bson.M{}).
+		Decode(&minValid)
+	if err != nil {
+		return models.Timestamp{}, fmt.Errorf("failed to get appliedThrough: %w", err)
+	}
+	if minValid.AppliedThrough == nil || minValid.AppliedThrough.TS == (bson.Timestamp{}) {
+		return lastOplogTS, nil
+	}
+
+	appliedThroughTS := models.TimestampFromBson(minValid.AppliedThrough.TS)
+	if models.LessTS(lastOplogTS, appliedThroughTS) {
+		return models.Timestamp{}, fmt.Errorf(
+			"appliedThrough %s is ahead of the last oplog entry %s",
+			appliedThroughTS.String(), lastOplogTS.String())
+	}
+	return appliedThroughTS, nil
+}
+
 // Close disconnects from mongodb
 //
 // If shutdown specified, gracefully shutdowns MongoDB before close
@@ -358,43 +413,48 @@ func (mc *MongoClient) getOplogCollection(ctx context.Context) (*mongo.Collectio
 	return odb.Collection(oplogCollectionName), nil
 }
 
-func (mc *MongoClient) getApplyOpsCmd() bson.D {
-	return mc.applyOpsCmd
+// ApplyOp calls applyOps and checks its response.
+func (mc *MongoClient) ApplyOp(ctx context.Context, dbop *db.Oplog) error {
+	return mc.ApplyOps(ctx, []*db.Oplog{dbop})
 }
 
-// ApplyOp calls applyOps and check response
-func (mc *MongoClient) ApplyOp(ctx context.Context, dbop *db.Oplog) error {
+func (mc *MongoClient) ApplyOps(ctx context.Context, dbops []*db.Oplog) error {
 	// mongod complains if 'ts' or 'history' are passed to applyOps
-	if dbop == nil {
-		return fmt.Errorf("MongoClient:ApplyOp: dbop is nil, it should not happen")
+	if len(dbops) == 0 {
+		return fmt.Errorf("MongoClient:ApplyOps: no oplog entries")
 	}
-	op := ApplyOplog{
-		Operation:  dbop.Operation,
-		Namespace:  dbop.Namespace,
-		Object:     dbop.Object,
-		Query:      dbop.Query,
-		UI:         dbop.UI,
-		LSID:       dbop.LSID,
-		TxnNumber:  dbop.TxnNumber,
-		PrevOpTime: dbop.PrevOpTime,
+	ops := make([]ApplyOplog, 0, len(dbops))
+	expected := 0
+	for _, dbop := range dbops {
+		if dbop == nil {
+			return fmt.Errorf("MongoClient:ApplyOps: dbop is nil")
+		}
+		ops = append(ops, ApplyOplog{
+			Operation:  dbop.Operation,
+			Namespace:  dbop.Namespace,
+			Object:     dbop.Object,
+			Query:      dbop.Query,
+			UI:         dbop.UI,
+			LSID:       dbop.LSID,
+			TxnNumber:  dbop.TxnNumber,
+			PrevOpTime: dbop.PrevOpTime,
+		})
+		if dbop.Operation != "n" {
+			expected++
+		}
 	}
 
-	// TODO: fix ugly interface after switch to passing pointers
-	cmd := mc.getApplyOpsCmd()
-	cmd[0] = bson.E{Key: "applyOps", Value: []interface{}{op}}
+	cmd := slices.Clone(mc.applyOpsCmd)
+	cmd[0] = bson.E{Key: "applyOps", Value: ops}
 	apply := mc.c.Database("admin").RunCommand(ctx, cmd)
 	if err := apply.Err(); err != nil {
 		return err
 	}
-	resp := CmdResponse{}
+	resp := applyOpsResponse{}
 	if err := apply.Decode(&resp); err != nil {
-		return fmt.Errorf("can not unmarshall command execution response: %+v\ncommand was:%+v", err, cmd)
+		return fmt.Errorf("can not decode applyOps response for %d entries: %w", len(dbops), err)
 	}
-	if resp.Ok != 1 {
-		return fmt.Errorf("command execution failed with: %s\ncommand was: %+v", resp.ErrMsg, cmd)
-	}
-
-	return nil
+	return resp.check(expected)
 }
 
 // BsonCursor implements OplogCursor with source io.reader
@@ -488,15 +548,15 @@ func (mc *MongoClient) ChangeOplogLastTimestamp(ctx context.Context, opTime mode
 		return err
 	}
 
-	return mc.fsync(ctx)
+	return mc.Fsync(ctx)
 }
 
 func (mc *MongoClient) changeMinValueTimestamp(ctx context.Context, opTime models.OpTime) error {
 	minValidCol := mc.c.Database(oplogDatabaseName).Collection("replset.minvalid")
 	var minValue = struct {
-		ID primitive.ObjectID  `bson:"_id,omitempty"`
-		TS primitive.Timestamp `bson:"ts"`
-		T  int64               `bson:"t"`
+		ID bson.ObjectID  `bson:"_id,omitempty"`
+		TS bson.Timestamp `bson:"ts"`
+		T  int64          `bson:"t"`
 	}{}
 
 	if err := minValidCol.FindOne(ctx, bson.M{}).Decode(&minValue); err != nil {
@@ -521,8 +581,8 @@ func (mc *MongoClient) changeMinValueTimestamp(ctx context.Context, opTime model
 func (mc *MongoClient) changeOplogTruncateAfterPointTimestamp(ctx context.Context) error {
 	otapCol := mc.c.Database(oplogDatabaseName).Collection("replset.oplogTruncateAfterPoint")
 	var otap = struct {
-		ID string              `bson:"_id,omitempty"`
-		TS primitive.Timestamp `bson:"oplogTruncateAfterPoint"`
+		ID string         `bson:"_id,omitempty"`
+		TS bson.Timestamp `bson:"oplogTruncateAfterPoint"`
 	}{}
 
 	if err := otapCol.FindOne(ctx, bson.M{}).Decode(&otap); err != nil {
@@ -530,7 +590,7 @@ func (mc *MongoClient) changeOplogTruncateAfterPointTimestamp(ctx context.Contex
 	}
 	result, err := otapCol.UpdateOne(ctx, bson.M{"_id": otap.ID}, bson.M{
 		"$set": bson.M{
-			"oplogTruncateAfterPoint": primitive.Timestamp{},
+			"oplogTruncateAfterPoint": bson.Timestamp{},
 		},
 	})
 
@@ -560,7 +620,7 @@ func (mc *MongoClient) addNoopToOplog(ctx context.Context, opTime models.OpTime)
 		{Key: "v", Value: 2},
 		{Key: "op", Value: "n"},
 		{Key: "ns", Value: ""},
-		{Key: "wall", Value: primitive.NewDateTimeFromTime(time.Now())},
+		{Key: "wall", Value: bson.NewDateTimeFromTime(time.Now())},
 		{Key: "o", Value: bson.D{
 			{Key: "msg", Value: "manually inserted oplog position"},
 		}},
@@ -571,7 +631,7 @@ func (mc *MongoClient) addNoopToOplog(ctx context.Context, opTime models.OpTime)
 	return err
 }
 
-func (mc *MongoClient) fsync(ctx context.Context) error {
+func (mc *MongoClient) Fsync(ctx context.Context) error {
 	res := mc.c.Database("admin").RunCommand(ctx, bson.D{
 		{Key: "fsync", Value: 1},
 		{Key: "lock", Value: false},

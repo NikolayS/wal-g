@@ -74,7 +74,6 @@ func (e *DevNullWriter) Write(p []byte) (int, error) {
 
 var _ io.Writer = &DevNullWriter{}
 
-// TODO : unit tests
 // Extract exactly one tar bundle.
 func extractOneTar(tarInterpreter TarInterpreter, source io.Reader) error {
 	tarReader := tar.NewReader(source)
@@ -113,11 +112,12 @@ func extractNonTar(tarInterpreter TarInterpreter, source io.Reader, path string,
 // DecryptAndDecompressTar decrypts file and checks its extension.
 // If it's tar, a decompression is not needed.
 // Otherwise it uses corresponding decompressor. If none found an error will be returned.
-func DecryptAndDecompressTar(reader io.Reader, filePath string, crypter crypto.Crypter) (io.ReadCloser, error) {
+func DecryptAndDecompressTar(ctx context.Context, reader io.Reader,
+	filePath string, crypter crypto.Crypter) (io.ReadCloser, error) {
 	var err error
 
 	if crypter != nil {
-		reader, err = crypter.Decrypt(reader)
+		reader, err = crypter.Decrypt(ctx, reader)
 		if err != nil {
 			return nil, errors.Wrap(err, "DecryptAndDecompressTar: decrypt failed")
 		}
@@ -223,7 +223,7 @@ func tryExtractFiles(downloadingContext context.Context,
 
 				filePath := fileClosure.StoragePath()
 				var extractingReader io.ReadCloser
-				extractingReader, err = DecryptAndDecompressTar(readCloser, filePath, crypter)
+				extractingReader, err = DecryptAndDecompressTar(downloadingContext, readCloser, filePath, crypter)
 				if err == nil {
 					defer extractingReader.Close()
 					err = extractFile(tarInterpreter, extractingReader, fileClosure)

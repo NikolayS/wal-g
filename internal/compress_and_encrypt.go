@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -31,13 +32,14 @@ func (err CompressAndEncryptError) Error() string {
 
 // CompressAndEncrypt compresses input to a pipe reader. Output must be used or
 // pipe will block.
-func CompressAndEncrypt(source io.Reader, compressor compression.Compressor, crypter crypto.Crypter) io.Reader {
+func CompressAndEncrypt(ctx context.Context, source io.Reader,
+	compressor compression.Compressor, crypter crypto.Crypter) io.Reader {
 	compressedReader, dstWriter := io.Pipe()
 
 	var writeCloser io.WriteCloser = dstWriter
 	if crypter != nil {
 		var err error
-		writeCloser, err = crypter.Encrypt(dstWriter)
+		writeCloser, err = crypter.Encrypt(ctx, dstWriter)
 
 		if err != nil {
 			panic(err)
@@ -63,7 +65,7 @@ func CompressAndEncrypt(source io.Reader, compressor compression.Compressor, cry
 			_ = dstWriter.CloseWithError(e)
 			return
 		}
-		if crypter != nil {
+		if crypter != nil && compressor != nil {
 			if err := writeCloser.Close(); err != nil {
 				e := newCompressingPipeWriterError("CompressAndEncrypt: encryption failed", err)
 				_ = dstWriter.CloseWithError(e)

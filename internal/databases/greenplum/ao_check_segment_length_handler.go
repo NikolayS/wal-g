@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/wal-g/tracelog"
 	"github.com/wal-g/wal-g/internal"
+	"github.com/wal-g/wal-g/internal/databases/greenplum/ao"
 	"github.com/wal-g/wal-g/internal/databases/postgres"
 	"github.com/wal-g/wal-g/pkg/storages/storage"
 	"github.com/wal-g/wal-g/utility"
@@ -194,18 +195,18 @@ FROM
       relfilenode, 
       relnamespace 
     FROM 
-      pg_class 
-      JOIN pg_appendonly ON oid OPERATOR(pg_catalog.=) relid
+      pg_catalog.pg_class
+      JOIN pg_catalog.pg_appendonly ON oid OPERATOR(pg_catalog.=) relid
   ) a, 
   (
     SELECT 
       relname, 
       segrelid 
     FROM 
-      pg_class 
-      JOIN pg_appendonly ON oid OPERATOR(pg_catalog.=) segrelid
+      pg_catalog.pg_class 
+      JOIN pg_catalog.pg_appendonly ON oid OPERATOR(pg_catalog.=) segrelid
   ) b, 
-  pg_namespace n 
+  pg_catalog.pg_namespace n 
 WHERE 
   a.relpersistence OPERATOR(pg_catalog.=) 'p' 
   AND a.segrelid OPERATOR(pg_catalog.=) b.segrelid 
@@ -247,7 +248,7 @@ func (checker *AOLengthCheckSegmentHandler) getDatabasesInfo(ctx context.Context
 		}
 	}()
 
-	rows, err := conn.Query(ctx, "SELECT datname, oid FROM pg_database WHERE datallowconn")
+	rows, err := conn.Query(ctx, "SELECT datname, oid FROM pg_catalog.pg_database WHERE datallowconn")
 	if err != nil {
 		return nil, err
 	}
@@ -290,7 +291,7 @@ func (checker *AOLengthCheckSegmentHandler) getTableMetadataEOF(ctx context.Cont
 	return metaEOF, nil
 }
 
-func (checker *AOLengthCheckSegmentHandler) getAOMetadata(ctx context.Context, backupName string) (BackupAOFiles, error) {
+func (checker *AOLengthCheckSegmentHandler) getAOMetadata(ctx context.Context, backupName string) (ao.BackupFiles, error) {
 	rootFolder := checker.rootFolder
 
 	var backup internal.Backup
@@ -303,9 +304,9 @@ func (checker *AOLengthCheckSegmentHandler) getAOMetadata(ctx context.Context, b
 	}
 
 	tracelog.DebugLogger.Printf("backup %s", backup.Name)
-	files := NewAOFilesMetadataDTO()
+	files := ao.NewFilesMetadataDTO()
 
-	err = internal.FetchDto(ctx, backup.Folder, &files, fmt.Sprintf("%s/ao_files_metadata.json", backup.Name))
+	err = internal.FetchDto(ctx, backup.Folder, &files, ao.GetFilesMetadataPath(backup.Name))
 	if err != nil {
 		tracelog.ErrorLogger.Printf("failed to fetch file data")
 		return nil, err

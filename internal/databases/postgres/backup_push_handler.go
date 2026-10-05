@@ -21,9 +21,30 @@ import (
 	conf "github.com/wal-g/wal-g/internal/config"
 	"github.com/wal-g/wal-g/internal/databases/postgres/orioledb"
 	"github.com/wal-g/wal-g/internal/multistorage"
+	"github.com/wal-g/wal-g/internal/printlist"
 	"github.com/wal-g/wal-g/pkg/storages/storage"
 	"github.com/wal-g/wal-g/utility"
 )
+
+type BackupInfo struct {
+	Name    string
+	Storage string
+}
+
+func (b BackupInfo) PrintableFields() []printlist.TableField {
+	return []printlist.TableField{
+		{
+			Name:       "name",
+			PrettyName: "Name of backup",
+			Value:      b.Name,
+		},
+		{
+			Name:       "storage",
+			PrettyName: "Name of storage",
+			Value:      b.Storage,
+		},
+	}
+}
 
 type backupFromFuture struct {
 	error
@@ -64,6 +85,9 @@ type BackupArguments struct {
 	withoutFilesMetadata     bool
 	composerInitFunc         func(ctx context.Context, handler *BackupHandler) error
 	preventConcurrentBackups bool
+	countJournals            bool
+	json                     bool
+	pretty                   bool
 }
 
 // CurBackupInfo holds all information that is harvest during the backup process
@@ -120,7 +144,8 @@ type BackupHandler struct {
 // NewBackupArguments creates a BackupArgument object to hold the arguments from the cmd
 func NewBackupArguments(uploader internal.Uploader, pgDataDirectory string, backupsFolder string, isPermanent bool,
 	verifyPageChecksums bool, isFullBackup bool, storeAllCorruptBlocks bool, tarBallComposerType TarBallComposerType,
-	deltaConfigurator DeltaBackupConfigurator, userData interface{}, withoutFilesMetadata bool) BackupArguments {
+	deltaConfigurator DeltaBackupConfigurator, userData interface{}, withoutFilesMetadata bool,
+	countJournals bool, json bool, pretty bool) BackupArguments {
 	return BackupArguments{
 		Uploader:              uploader,
 		pgDataDirectory:       pgDataDirectory,
@@ -132,10 +157,13 @@ func NewBackupArguments(uploader internal.Uploader, pgDataDirectory string, back
 		deltaConfigurator:     deltaConfigurator,
 		userData:              userData,
 		withoutFilesMetadata:  withoutFilesMetadata,
+		countJournals:         countJournals,
 		composerInitFunc: func(ctx context.Context, handler *BackupHandler) error {
 			return configureTarBallComposer(ctx, handler, tarBallComposerType)
 		},
 		preventConcurrentBackups: false,
+		json:                     json,
+		pretty:                   pretty,
 	}
 }
 
@@ -188,6 +216,11 @@ func (bh *BackupHandler) createAndPushBackup(ctx context.Context) {
 	if len(storageNames) == 0 {
 		tracelog.ErrorLogger.Fatalf("No storages are used in the uploading folder")
 	}
+
+	createdBackup := BackupInfo{Name: bh.CurBackupInfo.Name, Storage: storageNames[0]}
+
+	err = printlist.OneElement(createdBackup, os.Stdout, bh.Arguments.pretty, bh.Arguments.json)
+	tracelog.ErrorLogger.FatalOnError(err)
 
 	// logging backup set Name
 	tracelog.InfoLogger.Printf("Wrote backup with name %s to storage %s", bh.CurBackupInfo.Name, storageNames[0])
@@ -385,12 +418,51 @@ func (bh *BackupHandler) uploadBackup(ctx context.Context) internal.TarFileSets 
 // TODO : unit tests
 func (bh *BackupHandler) HandleBackupPush(ctx context.Context) {
 	bh.CurBackupInfo.StartTime = utility.TimeNowCrossPlatformUTC()
+	// Must capture before dispatch: handleBackupPushLocal/Remote call uploader.ChangeDirectory(...),
+	// which mutates bh.Arguments.Uploader's stored folder in place.
+	rootFolder := bh.Arguments.Uploader.Folder()
 
 	if bh.Arguments.pgDataDirectory == "" {
 		bh.handleBackupPushRemote(ctx)
 	} else {
 		bh.handleBackupPushLocal(ctx)
 	}
+
+	bh.handleJournalInfo(ctx, rootFolder)
+}
+
+// handleJournalInfo maintains a journal_<backup> object in storage tracking the WAL volume
+// accumulated between this backup and the next one (see internal.JournalInfo).
+func (bh *BackupHandler) handleJournalInfo(ctx context.Context, rootFolder storage.Folder) {
+	if !bh.Arguments.countJournals {
+		tracelog.InfoLogger.Printf("WAL journal counting mode is disabled: option is disabled")
+		return
+	}
+	if bh.Arguments.isPermanent {
+		tracelog.InfoLogger.Printf("WAL journal counting mode is disabled: the backup is permanent")
+		return
+	}
+
+	finishTime := utility.TimeNowCrossPlatformUTC()
+
+	mostRecentJournalInfo, err := internal.GetMostRecentJournalInfo(ctx, rootFolder, utility.WalPath)
+	if err != nil {
+		tracelog.WarningLogger.Printf("can not find the last journal info: %s", err.Error())
+	}
+
+	journalInfo := internal.NewEmptyJournalInfo(bh.CurBackupInfo.Name, mostRecentJournalInfo.CurrentBackupEnd, finishTime, utility.WalPath)
+
+	if err := journalInfo.Upload(ctx, rootFolder); err != nil {
+		tracelog.WarningLogger.Printf("can not upload the journal info: %s", err.Error())
+		return
+	}
+
+	if err := journalInfo.UpdateIntervalSize(ctx, rootFolder, &internal.JournalFiles{}); err != nil {
+		tracelog.WarningLogger.Printf("can not calculate journal size: %s", err.Error())
+		return
+	}
+
+	tracelog.InfoLogger.Printf("uploaded journal info for %s", bh.CurBackupInfo.Name)
 }
 
 func (bh *BackupHandler) handleBackupPushRemote(ctx context.Context) {

@@ -1,27 +1,28 @@
 FROM wal-g/golang:latest AS build
-ENV GOEXPERIMENT=jsonv2
 WORKDIR /go/src/github.com/wal-g/wal-g
 
 RUN apt-get update && \
     apt-get install --yes --no-install-recommends --no-install-suggests \
-    liblzo2-dev
+    liblzo2-dev git
 
+COPY .git .git
+COPY .gitmodules .gitmodules
 COPY go.mod go.mod
+COPY go.sum go.sum
 COPY vendor/ vendor/
 COPY internal/ internal/
 COPY pkg/ pkg/
 COPY cmd/ cmd/
 COPY main/ main/
 COPY utility/ utility/
+COPY test/ test/
+COPY testtools/ testtools/
+COPY link_brotli.sh link_brotli.sh
+COPY CMakeLists-brotli.txt CMakeLists-brotli.txt
+COPY Makefile Makefile
 
-RUN sed -i 's|#cgo LDFLAGS: -lbrotli.*|&-static -lbrotlicommon-static -lm|' \
-        vendor/github.com/google/brotli/go/cbrotli/cgo.go && \
-    sed -i 's|\(#cgo LDFLAGS:\) .*|\1 -Wl,-Bstatic -llzo2 -Wl,-Bdynamic|' \
-        vendor/github.com/cyberdelia/lzo/lzo.go
-RUN --mount=type=cache,target=/gocache cd main/pg && GOCACHE=/gocache \
-    go build -mod vendor -race -o wal-g -tags "brotli lzo" -ldflags "-s -w -X main.buildDate=`date -u +%Y.%m.%d_%H:%M:%S`"
-RUN --mount=type=cache,target=/gocache cd cmd/daemonclient && GOCACHE=/gocache \
-    go build -mod vendor -o walg-daemon-client -ldflags "-s -w -X main.buildDate=`date -u +%Y.%m.%d_%H:%M:%S`"
+RUN --mount=type=cache,target=/gocache GOCACHE=/gocache \
+    USE_BROTLI=1 USE_LZO=1 make ENABLE_RACE_DETECTION=1 deps pg_build build_client
 
 RUN --mount=type=cache,target=/gocache cd pkg/storages/swift && GOCACHE=/gocache go test -v -c
 RUN --mount=type=cache,target=/gocache cd pkg/storages/sh && GOCACHE=/gocache go test -v -c
@@ -29,12 +30,11 @@ RUN --mount=type=cache,target=/gocache cd pkg/storages/sh && GOCACHE=/gocache go
 
 FROM wal-g/ubuntu:22.04
 
-ENV PGDATA=/var/lib/postgresql/16/main
+ENV PGDATA /var/lib/postgresql/17/main
 
 RUN apt-get update && \
 	DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends --no-install-suggests \
-		wget \
-		curl
+		curl jq
 
 RUN mkdir -p /usr/src/postgresql/contrib/orioledb && chmod 777 /usr/src/postgresql/contrib/orioledb
 
@@ -42,14 +42,14 @@ WORKDIR /usr/src/postgresql/contrib/orioledb
 RUN set -eux; \
 	git init; \
 	git remote add origin https://github.com/orioledb/orioledb.git; \
-	git -c protocol.version=2 fetch --no-tags --prune --progress --no-recurse-submodules --depth=1 origin +466738fe9d9a0f225ee5e5c776182ad426ae2008:refs/remotes/origin/main; \
+	git -c protocol.version=2 fetch --no-tags --prune --progress --no-recurse-submodules --depth=1 origin +beta16:refs/remotes/origin/main; \
 	git checkout --progress --force -B main refs/remotes/origin/main;
 
 WORKDIR /
 RUN set -eux; \
 	\
 	# don't forget to change PGTAG below
-	PGTAG=$(grep "^16: " /usr/src/postgresql/contrib/orioledb/.pgtags | cut -d' ' -f2-) ; \
+	PGTAG=$(grep "^17: " /usr/src/postgresql/contrib/orioledb/.pgtags | cut -d' ' -f2-) ; \
 	\
 	curl -o postgresql.tar.gz \
 			--header "Accept: application/vnd.github.v3.raw" \
@@ -85,8 +85,7 @@ RUN set -eux; \
 		libzstd-dev \
 		make \
 		pkg-config \
-		uuid-dev \
-		wget
+		uuid-dev
 
 WORKDIR /usr/src/postgresql
 ENV PATH="$PATH:/usr/local/bin"
@@ -94,7 +93,7 @@ ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib"
 RUN set -eux; \
 	\
 	# don't forget to change PGTAG above
-	PGTAG=$(grep "^16: " /usr/src/postgresql/contrib/orioledb/.pgtags | cut -d' ' -f2-) ; \
+	PGTAG=$(grep "^17: " /usr/src/postgresql/contrib/orioledb/.pgtags | cut -d' ' -f2-) ; \
 	ORIOLEDB_VERSION=$(grep "^#define ORIOLEDB_VERSION" /usr/src/postgresql/contrib/orioledb/include/orioledb.h | cut -d'"' -f2) ; \
 	ORIOLEDB_BUILDTIME=$(date -Iseconds) ; \
 	\
@@ -118,13 +117,21 @@ RUN set -eux; \
 		--with-zstd \
 		--with-extra-version=" ${ORIOLEDB_VERSION} PGTAG=${PGTAG} ubuntu:jammy+clang build:${ORIOLEDB_BUILDTIME}" \
 	|| cat config.log ); \
-	echo "ORIOLEDB_PATCHSET_VERSION = `echo $PGTAG | cut -d'_' -f2`" >> src/Makefile.global; \
+	if printf "%s\n" "$PGTAG" | grep -Fqe "patches${PG_MAJOR}_"; then \
+		echo "ORIOLEDB_PATCHSET_VERSION = `echo $PGTAG | cut -d'_' -f2`" >> src/Makefile.global; \
+	else \
+		echo "ORIOLEDB_PATCHSET_VERSION = $PGTAG" >> src/Makefile.global; \
+	fi ; \
+	# install postgresql
 	make -j "$(nproc)"; \
 	make -C contrib -j "$(nproc)"; \
-	make -C contrib/orioledb -j "$(nproc)"; \
 	make install; \
 	make -C contrib install; \
-	make -C contrib/orioledb install; \
+	# install orioledb extension
+	cd /usr/src/postgresql/contrib/orioledb; \
+	make USE_PGXS=1 IS_DEV=1 -j "$(nproc)"; \
+	make USE_PGXS=1 IS_DEV=1 install; \
+
 	postgres --version
 
 COPY docker/common/s3cfg /var/lib/postgresql/.s3cfg
@@ -148,11 +155,12 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y netcat-o
 COPY --from=build /go/src/github.com/wal-g/wal-g/pkg/storages/swift/swift.test /tmp/test_bins/
 COPY --from=build /go/src/github.com/wal-g/wal-g/pkg/storages/sh/sh.test /tmp/test_bins/
 COPY --from=build /go/src/github.com/wal-g/wal-g/main/pg/wal-g /usr/bin
-COPY --from=build /go/src/github.com/wal-g/wal-g/cmd/daemonclient/walg-daemon-client /usr/bin
+COPY --from=build /go/src/github.com/wal-g/wal-g/bin/walg-daemon-client /usr/bin
 
 COPY docker/pg_tests/scripts/scripts/ /tmp/scripts/
 COPY docker/pg_tests/scripts/configs/common_config.json /tmp/configs/
 COPY docker/orioledb/scripts/ /tmp
+COPY docker/pg_tests/scripts/tests/test_functions/prepare_config.sh /tmp/tests/test_functions/
 
 RUN mkdir -p /tmp/logs/ && chmod 777 /tmp/configs/ && chmod 777 /tmp/logs/
 RUN mkdir -p /var/run/postgresql && chmod 777 /var/run/postgresql

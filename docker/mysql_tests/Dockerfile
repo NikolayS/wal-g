@@ -1,25 +1,25 @@
+ARG MYSQL_IMAGE=wal-g/mysql84:latest
 FROM wal-g/golang:latest AS build
-ENV GOEXPERIMENT=jsonv2
 WORKDIR /go/src/github.com/wal-g/wal-g
 
 COPY go.mod go.mod
+COPY go.sum go.sum
 COPY vendor/ vendor/
 COPY internal/ internal/
 COPY pkg/ pkg/
 COPY cmd/ cmd/
 COPY main/ main/
 COPY utility/ utility/
+COPY Makefile Makefile
 
-RUN sed -i 's|#cgo LDFLAGS: -lbrotli.*|&-static -lbrotlicommon-static -lm|' \
-        vendor/github.com/google/brotli/go/cbrotli/cgo.go && \
-    cd main/mysql && \
-    go build -mod vendor -tags brotli -race -o wal-g -ldflags "-s -w -X main.buildDate=`date -u +%Y.%m.%d_%H:%M:%S`"
+# We test WAL-G logic, not optional compression dependencies. Race detection is
+# enabled on x86_64; the bionic Go image lacks the ARM64 race runtime dependencies.
+RUN make $( [ "$(uname -m)" = "x86_64" ] && echo ENABLE_RACE_DETECTION=1 ) mysql_build
 
-FROM wal-g/mysql:latest
-COPY --from=build /go/src/github.com/wal-g/wal-g/main/mysql/wal-g /usr/bin
+FROM ${MYSQL_IMAGE}
 
-RUN mkdir /root/testtools
+COPY --from=build /go/src/github.com/wal-g/wal-g/main/mysql/wal-g /usr/bin/wal-g
 
 COPY docker/mysql_tests/scripts/ /tmp
 
-CMD /tmp/run_integration_tests.sh
+CMD ["/tmp/run_integration_tests.sh"]

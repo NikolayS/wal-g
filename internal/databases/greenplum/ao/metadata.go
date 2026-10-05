@@ -1,0 +1,64 @@
+package ao
+
+import (
+	"time"
+)
+
+const FilesMetadataName = "ao_files_metadata.json"
+
+// GetFilesMetadataPath returns AO files metadata storage path.
+func GetFilesMetadataPath(backupName string) string {
+	return backupName + "/" + FilesMetadataName
+}
+
+type BackupFileDesc struct {
+	StoragePath   string `json:"StoragePath"`
+	IsSkipped     bool   `json:"IsSkipped"`
+	IsIncremented bool   `json:"IsIncremented,omitempty"`
+	// MTime is the filesystem mtime captured before reading the file. Assuming normally
+	// advancing filesystem timestamps, MTime is a lower bound for subsequent changes.
+	// The composer waits until MTime's second has ended before reading, so an equal
+	// current mtime indicates no changes since copying. Changes between stat and the
+	// start of copying can share this mtime, but their contents are included in the copy.
+	MTime           time.Time      `json:"MTime"`
+	StorageType     RelStorageType `json:"StorageType"`
+	EOF             int64          `json:"EOF"`
+	ModCount        int64          `json:"ModCount,omitempty"`
+	Compressor      string         `json:"Compressor,omitempty"`
+	FileMode        int64          `json:"FileMode"`
+	InitialUploadTS time.Time      `json:"InitialUploadTS,omitempty"`
+	Checksum        string         `json:"Checksum,omitempty"`
+}
+
+type FilesMetadataDTO struct {
+	Files BackupFiles
+	// UploadedSharedSize is the INITIAL volume this backup uploaded to the shared aosegments/ storage:
+	// Files smaller than WALG_GP_AOSEG_SIZE_THRESHOLD go into the regular tar balls and are not
+	// part of it.
+	//
+	// It is immutable and may not reflect current ownership: at the cluster level a backup can be
+	// charged for files of an older backup that was deleted while this one still references them.
+	UploadedSharedSize int64 `json:",omitempty"`
+}
+
+type BackupFiles map[string]*BackupFileDesc
+
+func NewFilesMetadataDTO() *FilesMetadataDTO {
+	return &FilesMetadataDTO{Files: make(BackupFiles)}
+}
+
+func (m *FilesMetadataDTO) addFile(key, storagePath string, mTime, initialUplTS time.Time, aoMeta RelFileMetadata,
+	fileMode int64, isSkipped, isIncremented bool, checksum string) {
+	m.Files[key] = &BackupFileDesc{
+		StoragePath:     storagePath,
+		IsSkipped:       isSkipped,
+		IsIncremented:   isIncremented,
+		MTime:           mTime,
+		EOF:             aoMeta.eof,
+		StorageType:     aoMeta.storageType,
+		FileMode:        fileMode,
+		ModCount:        aoMeta.modCount,
+		InitialUploadTS: initialUplTS,
+		Checksum:        checksum,
+	}
+}

@@ -1,13 +1,10 @@
 #!/bin/sh
 
 set -e -x
+. /tmp/tests/test_functions/prepare_config.sh
 CONFIG_FILE="/tmp/configs/compatibility_test_config.json"
-COMMON_CONFIG="/tmp/configs/common_config.json"
 TMP_CONFIG="/tmp/configs/tmp_config.json"
-cat ${CONFIG_FILE} > ${TMP_CONFIG}
-echo "," >> ${TMP_CONFIG}
-cat ${COMMON_CONFIG} >> ${TMP_CONFIG}
-/tmp/scripts/wrap_config_file.sh ${TMP_CONFIG}
+prepare_config "${CONFIG_FILE}" "${TMP_CONFIG}"
 
 initdb ${PGDATA}
 
@@ -31,13 +28,12 @@ psql -d postgres -c "CREATE TABLE o_test(a int) USING orioledb;"
 psql -d postgres -c "INSERT INTO o_test VALUES (1), (5), (2);"
 psql -d postgres -c "TABLE o_test;"
 psql -d postgres -c "DROP TABLE o_test;"
-psql -d postgres -c "DROP EXTENSION orioledb;"
 
 pgbench -i -s 4 postgres
 wal-g --config=${TMP_CONFIG} backup-push ${PGDATA}
 
 pgbench -i -s 8 postgres
-pg_dumpall -f /tmp/dump1
+pg_dumpall -f /tmp/dump1 --restrict-key=orioledbkey
 pgbench -c 2 -T 100000000 -S &
 sleep 1
 wal-g --config=${TMP_CONFIG} backup-push ${PGDATA}
@@ -53,11 +49,11 @@ pg_ctl -D ${PGDATA} -w start
 
 /tmp/scripts/wait_while_pg_not_ready.sh
 
-pg_dumpall -f /tmp/dump2
+pg_dumpall -f /tmp/dump2 --restrict-key=orioledbkey
 
 diff /tmp/dump1 /tmp/dump2
 
-psql -f /tmp/scripts/amcheck.sql -v "ON_ERROR_STOP=1" postgres
+psql -f /tmp/scripts/orioledb_check.sql -v "ON_ERROR_STOP=1" postgres
 wal-g --config=${TMP_CONFIG} delete everything FORCE --confirm
 
 rm ${TMP_CONFIG}

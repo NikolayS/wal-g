@@ -100,6 +100,17 @@ wal-g backup-push --delta-from-user-data "{ \"x\": [3], \"y\": 4 }" --config=/pa
 
 To prevent WAL-G from falling back to a full scan delta backup when it fails to download delta files.
 
+#### Journal size (WAL volume) accounting
+
+Run ``backup-push`` with the ``--count-journals`` flag to track the volume of WAL accumulated between one backup and the next one. The size is computed from the actual storage object sizes of the archived WAL segments, so it correctly reflects compression, unlike an LSN-difference estimate.
+
+```bash
+wal-g backup-push --count-journals --config=/path/to/config.yaml
+```
+Journal accounting is skipped for permanent backups (marked with ``--permanent``), since they are not expected to be removed and don't take part in WAL retention planning.
+
+Currently, only ``delete target`` cleans up and re-merges the corresponding journal entries when a backup is removed; other ``delete`` modes (``before``, ``retain``, ``everything``, ``garbage``) leave existing journals untouched.
+
 ### ``backup-fetch``
 
 When fetching base backups, the user should pass in the cluster restore configuration and the name of the backup.
@@ -112,6 +123,16 @@ WAL-G can also fetch the latest backup:
 ```bash
 wal-g backup-fetch LATEST --restore-config=/path/to/restore_cfg.json --config=/path/to/config.yaml
 ```
+
+### ``copy``
+
+Copies a cluster backup, every coordinator/segment backup chain, and the WAL required for its cluster restore point without transforming payload objects:
+
+```bash
+wal-g copy --from=config_from.yaml --to=config_to.yaml --backup-name=LATEST
+```
+
+`--with-history` extends every coordinator/segment WAL stream through the LSN recorded by the newest cluster-wide restore point. WAL-G publishes restore-point metadata only after all referenced streams are present. Repeating the command later adds newly archived WAL and restore points while skipping immutable objects already present at the destination.
 
 Cluster restore configuration declares destination host, directory, and port for each segment.  Sample restore configuration:
 ```json

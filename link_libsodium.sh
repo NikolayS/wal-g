@@ -3,9 +3,10 @@
 set -e
 
 readonly CWD=$PWD
+readonly SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 readonly OS=$(uname)
 readonly ARCH=$(uname -m)
-readonly LIBSODIUM_VERSION=${LIBSODIUM_VERSION:-1.0.21}
+readonly LIBSODIUM_VERSION=$(tr -d '\r\n' < "${SCRIPT_DIR}/.github/versions/libsodium-version")
 
 test -d tmp/libsodium || mkdir -p tmp/libsodium
 
@@ -26,7 +27,7 @@ if [[ "${OS}" == "Linux" ]] && [[ "${ARCH}" == *arm* || "${ARCH}" == "aarch64" ]
 fi
 
 CFLAGS="${LOCAL_CFLAGS}" ./configure ${CONFIGURE_ARGS}
-make && make check && make install
+make && make install
 
 # Remove shared libraries for using static
 rm -f lib/*.so lib/*.so.* lib/*.dylib

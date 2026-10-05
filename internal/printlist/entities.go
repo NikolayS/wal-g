@@ -7,7 +7,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/jedib0t/go-pretty/table"
+	"github.com/jedib0t/go-pretty/v6/table"
 )
 
 type Entity interface {
@@ -30,6 +30,29 @@ func List(entitiesInOrder []Entity, output io.Writer, pretty, json bool) error {
 		return nil
 	}
 	return listInTabbedTable(entitiesInOrder, output)
+}
+
+func OneElement(entity Entity, output io.Writer, pretty, json bool) error {
+	if json {
+		return oneElementInJSON(entity, output, pretty)
+	}
+	_, err := fmt.Fprintln(output, entity)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func oneElementInJSON(entity Entity, output io.Writer, pretty bool) error {
+	encoder := json.NewEncoder(output)
+	if pretty {
+		encoder.SetIndent("", "    ")
+	}
+	err := encoder.Encode(entity)
+	if err != nil {
+		return fmt.Errorf("encode to JSON: %w", err)
+	}
+	return nil
 }
 
 // listInJSON prints entities in JSON format. All fields that aren't hidden by json tags are printed, not just ones

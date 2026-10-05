@@ -1,0 +1,71 @@
+package ao_test
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"os"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/wal-g/wal-g/internal/databases/greenplum/ao"
+	"github.com/wal-g/wal-g/internal/walparser/parsingutil"
+)
+
+const aoSegmentFileName = "../../../../test/testdata/gp_ao_file.bin"
+const aoSegmentFileSizeBytes = 192
+
+func TestReadIncrement(t *testing.T) {
+	gpReadIncrement(10, 100, t)
+}
+
+func TestReadIncrementFull(t *testing.T) {
+	gpReadIncrement(0, aoSegmentFileSizeBytes, t)
+}
+
+func TestFailOnIncorrectOffset(t *testing.T) {
+	file, err := os.Open(aoSegmentFileName)
+	if err != nil {
+		fmt.Print(err.Error())
+	}
+
+	_, err = ao.NewIncrementalPageReader(t.Context(), file, aoSegmentFileSizeBytes, aoSegmentFileSizeBytes)
+	assert.Error(t, err)
+
+	_, err = ao.NewIncrementalPageReader(t.Context(), file, 0, aoSegmentFileSizeBytes)
+	assert.Error(t, err)
+}
+
+func gpReadIncrement(offset, eof int64, t *testing.T) {
+	file, err := os.Open(aoSegmentFileName)
+	if err != nil {
+		fmt.Print(err.Error())
+	}
+
+	reader, err := ao.NewIncrementalPageReader(t.Context(), file, eof, offset)
+	assert.NoError(t, err)
+
+	increment, err := io.ReadAll(reader)
+	assert.NoError(t, err)
+
+	incrementBuf := bytes.NewBuffer(increment)
+	err = ao.ReadIncrementFileHeader(incrementBuf)
+	assert.NoError(t, err)
+
+	var parsedEOF uint64
+	var parsedOffset uint64
+	err = parsingutil.ParseMultipleFieldsFromReader([]parsingutil.FieldToParse{
+		{Field: &parsedEOF, Name: "eof"},
+		{Field: &parsedOffset, Name: "offset"},
+	}, incrementBuf)
+
+	assert.Equal(t, parsedOffset, uint64(offset))
+	assert.Equal(t, parsedEOF, uint64(eof))
+
+	_, _ = file.Seek(offset, io.SeekStart)
+
+	fileFragment := new(bytes.Buffer)
+	_, _ = io.CopyN(fileFragment, file, eof-offset)
+
+	assert.True(t, bytes.Equal(fileFragment.Bytes(), incrementBuf.Bytes()))
+}
