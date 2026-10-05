@@ -190,7 +190,13 @@ func ConfigureStorageForSpecificConfig(
 
 func getWalFolderPath() string {
 	if !viper.IsSet(conf.PgDataSetting) {
-		return GetDefaultDataFolderPath()
+		// PostgreSQL runs archive_command and restore_command in the data directory.
+		// So the current directory is PGDATA.
+		cwd, err := os.Getwd()
+		if err != nil {
+			return GetDefaultDataFolderPath()
+		}
+		return getRelativeWalFolderPath(cwd)
 	}
 	return getRelativeWalFolderPath(viper.GetString(conf.PgDataSetting))
 }
