@@ -69,6 +69,48 @@ func TestGetDataFolderPath_Default(t *testing.T) {
 	resetToDefaults()
 }
 
+func TestGetDataFolderPath_CwdWal(t *testing.T) {
+	pgEnv, pgEnvSet := os.LookupEnv(config.PgDataSetting)
+	os.Unsetenv(config.PgDataSetting)
+	defer func() {
+		if pgEnvSet {
+			os.Setenv(config.PgDataSetting, pgEnv)
+		}
+		resetToDefaults()
+	}()
+	resetToDefaults()
+	viper.Set(config.PgDataSetting, nil)
+
+	pgdata := t.TempDir()
+	assert.NoError(t, os.Mkdir(filepath.Join(pgdata, "pg_wal"), 0700))
+	t.Chdir(pgdata)
+	cwd, err := os.Getwd()
+	assert.NoError(t, err)
+
+	actual := internal.GetDataFolderPath()
+
+	assert.Equal(t, filepath.ToSlash(filepath.Join(cwd, "pg_wal", "walg_data")), actual)
+}
+
+func TestGetDataFolderPath_CwdWithoutWal(t *testing.T) {
+	pgEnv, pgEnvSet := os.LookupEnv(config.PgDataSetting)
+	os.Unsetenv(config.PgDataSetting)
+	defer func() {
+		if pgEnvSet {
+			os.Setenv(config.PgDataSetting, pgEnv)
+		}
+		resetToDefaults()
+	}()
+	resetToDefaults()
+	viper.Set(config.PgDataSetting, nil)
+
+	t.Chdir(t.TempDir())
+
+	actual := internal.GetDataFolderPath()
+
+	assert.Equal(t, filepath.ToSlash(filepath.Join(os.TempDir(), "walg_data")), actual)
+}
+
 func TestGetDataFolderPath_FolderNotExist(t *testing.T) {
 	parentDir := prepareDataFolder(t, "someOtherFolder")
 	defer testtools.Cleanup(t, parentDir)

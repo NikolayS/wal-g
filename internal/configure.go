@@ -40,7 +40,8 @@ const (
 	WaleFileHost              = "file://localhost"
 )
 
-// GetDefaultDataFolderPath is typically "/tmp"
+// GetDefaultDataFolderPath is typically "/tmp". It is used only when neither PGDATA
+// nor the current working directory contains pg_wal (or pg_xlog).
 func GetDefaultDataFolderPath() string {
 	return filepath.ToSlash(os.TempDir())
 }
@@ -190,19 +191,33 @@ func ConfigureStorageForSpecificConfig(
 
 func getWalFolderPath() string {
 	if !viper.IsSet(conf.PgDataSetting) {
+		// PostgreSQL runs archive_command and restore_command with the data directory
+		// as the working directory, so prefer it over the default temp folder.
+		if cwd, err := os.Getwd(); err == nil {
+			if walFolderPath, ok := findWalFolderPath(cwd); ok {
+				return walFolderPath
+			}
+		}
 		return GetDefaultDataFolderPath()
 	}
 	return getRelativeWalFolderPath(viper.GetString(conf.PgDataSetting))
 }
 
 func getRelativeWalFolderPath(pgdata string) string {
+	if walFolderPath, ok := findWalFolderPath(pgdata); ok {
+		return walFolderPath
+	}
+	return GetDefaultDataFolderPath()
+}
+
+func findWalFolderPath(pgdata string) (string, bool) {
 	for _, walDir := range []string{"pg_wal", "pg_xlog"} {
 		dataFolderPath := filepath.Join(pgdata, walDir)
 		if _, err := os.Stat(dataFolderPath); err == nil {
-			return dataFolderPath
+			return dataFolderPath, true
 		}
 	}
-	return GetDefaultDataFolderPath()
+	return "", false
 }
 
 func GetDataFolderPath() string {

@@ -397,6 +397,8 @@ wal-g wal-push /path/to/archive
 
 This command is intended to be executed from the Postgres [archive_command](https://www.postgresql.org/docs/current/runtime-config-wal.html#GUC-ARCHIVE-COMMAND) parameter.
 
+WAL-G keeps its working state (e.g. `walg_archive_status`) in `walg_data` inside `$PGDATA/pg_wal`. If `PGDATA` is not set, WAL-G looks for `pg_wal` (or `pg_xlog`) in the current working directory, which is the data directory when called from `archive_command`/`restore_command`, and only falls back to the system temp directory (typically `/tmp`) if none is found.
+
 ### ``wal-show``
 
 Show information about the WAL storage folder. `wal-show` shows all WAL segment timelines available in storage, displays the available backups for them, and checks them for missing segments.
