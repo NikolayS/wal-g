@@ -16,6 +16,7 @@ import (
 	"github.com/wal-g/wal-g/internal/compression/lzma"
 	walgzstd "github.com/wal-g/wal-g/internal/compression/zstd"
 	"github.com/wal-g/wal-g/internal/config"
+	"github.com/wal-g/wal-g/internal/fsutil"
 	"github.com/wal-g/wal-g/internal/limiters"
 	"github.com/wal-g/wal-g/testtools"
 	"golang.org/x/time/rate"
@@ -70,11 +71,7 @@ func TestGetDataFolderPath_Default(t *testing.T) {
 }
 
 func TestGetDataFolderPath_CwdWal(t *testing.T) {
-	t.Setenv(config.PgDataSetting, "") // restores the real PGDATA after the test
-	os.Unsetenv(config.PgDataSetting)
-	resetToDefaults()
-	defer resetToDefaults()
-	viper.Set(config.PgDataSetting, nil)
+	unsetPgData(t)
 
 	pgdata := t.TempDir()
 	assert.NoError(t, os.Mkdir(filepath.Join(pgdata, "pg_wal"), 0700))
@@ -87,18 +84,15 @@ func TestGetDataFolderPath_CwdWal(t *testing.T) {
 	assert.Equal(t, filepath.ToSlash(filepath.Join(cwd, "pg_wal", "walg_data")), actual)
 }
 
+// Guards the default fallback. Passes with and without the cwd change.
 func TestGetDataFolderPath_CwdWithoutWal(t *testing.T) {
-	t.Setenv(config.PgDataSetting, "") // restores the real PGDATA after the test
-	os.Unsetenv(config.PgDataSetting)
-	resetToDefaults()
-	defer resetToDefaults()
-	viper.Set(config.PgDataSetting, nil)
+	unsetPgData(t)
 
 	t.Chdir(t.TempDir())
 
 	actual := internal.GetDataFolderPath()
 
-	assert.Equal(t, filepath.ToSlash(filepath.Join(os.TempDir(), "walg_data")), actual)
+	assert.Equal(t, path.Join(internal.GetDefaultDataFolderPath(), "walg_data"), actual)
 }
 
 func TestGetDataFolderPath_FolderNotExist(t *testing.T) {
@@ -176,6 +170,21 @@ func TestConfigureArchiveStatusManager(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.True(t, manager.FileExists(fileName))
+}
+
+func TestConfigurePGArchiveStatusManager_Cwd(t *testing.T) {
+	unsetPgData(t)
+
+	pgdata := t.TempDir()
+	assert.NoError(t, os.MkdirAll(filepath.Join(pgdata, "pg_wal", "archive_status"), 0700))
+	t.Chdir(pgdata)
+	cwd, err := os.Getwd()
+	assert.NoError(t, err)
+
+	manager, err := internal.ConfigurePGArchiveStatusManager()
+
+	assert.NoError(t, err)
+	assert.Equal(t, filepath.Join(cwd, "pg_wal", "archive_status"), manager.(*fsutil.DiskDataFolder).Path)
 }
 
 func TestConfigureCompressor_Lz4Method(t *testing.T) {
@@ -257,6 +266,15 @@ func prepareDataFolder(t *testing.T, name string) string {
 	}
 	fmt.Println(dir)
 	return dir
+}
+
+// unsetPgData clears PGDATA in env and viper for one test.
+func unsetPgData(t *testing.T) {
+	t.Setenv(config.PgDataSetting, "") // restores the real PGDATA after the test
+	os.Unsetenv(config.PgDataSetting)
+	resetToDefaults()
+	t.Cleanup(resetToDefaults)
+	viper.Set(config.PgDataSetting, nil)
 }
 
 func resetToDefaults() {
